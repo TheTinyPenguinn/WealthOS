@@ -1,0 +1,51 @@
+# ============================================================================
+# WEALTHOS .GITIGNORE - Security & Environment Files
+# ============================================================================
+
+# Financial Data - CRITICAL: Never commit financial data
+expenses.csv
+
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Mac System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE & Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# Streamlit Cache (optional but recommended)
+.streamlit/secrets.toml
+
+# Distribution / Packaging
+dist/
+build/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment Variables (if any)
+.env
+.env.local
