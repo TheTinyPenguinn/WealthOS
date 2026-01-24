@@ -49,3 +49,7 @@ htmlcov/
 # Environment Variables (if any)
 .env
 .env.local
+
+# Security Updates
+investments.csv
+backups/
