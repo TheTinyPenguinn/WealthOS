@@ -29,6 +29,14 @@ try:
 except ImportError:
     OPENPYXL_AVAILABLE = False
 
+# Optional Google Gemini import for AI features (new google.genai package)
+try:
+    from google import genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    genai = None
+
 # ============================================================================
 # CONSTANTS & CONFIGURATION
 # ============================================================================
@@ -36,7 +44,7 @@ except ImportError:
 CSV_FILE = "expenses.csv"
 INVESTMENTS_FILE = "investments.csv"
 BACKUP_DIR = "backups"
-CATEGORIES = ["Needs", "Wants", "Financial", "Income"]
+CATEGORIES = ["Needs", "Wants", "Financial", "Income", "Asset", "One-Time"] # Added "One-Time"
 ASSET_TYPES = ["Stock", "Mutual Fund", "Gold", "ETF", "Crypto"]
 HEADER_KEYWORDS = ["date", "txn date", "description", "narration", "credit", "debit", 
                    "withdrawal", "deposit", "amount", "particulars", "remarks"]
@@ -581,6 +589,114 @@ def auto_categorize(df, force_overwrite=False):
     return df, changes
 
 # ============================================================================
+# AI CONTEXT ENGINE
+# ============================================================================
+
+def generate_financial_context():
+    """Generates a summary string of the user's financial health for the AI."""
+    try:
+        # 1. Net Worth Snapshot
+        # Safety check: ensure accounts dataframe exists
+        if 'accounts' in st.session_state and not st.session_state.accounts.empty:
+            liquid_cash = st.session_state.accounts[st.session_state.accounts['Type'] == 'Asset']['Balance'].sum()
+            debt = st.session_state.accounts[st.session_state.accounts['Type'] == 'Liability']['Balance'].sum()
+        else:
+            liquid_cash = st.session_state.bank_balance
+            debt = 0.0
+        
+        portfolio_val = 0
+        if not st.session_state.investments.empty:
+            portfolio_val = (st.session_state.investments['Quantity'] * st.session_state.investments['Avg_Buy_Price']).sum()
+            
+        # --- LOGIC UPDATE: INCLUDE STOCKS IN LIQUIDITY ---
+        # Stocks are liquid (you can sell them in T+1 days).
+        # Real Safety Net = Cash + Portfolio (excluding Locked-in assets like PPF if you had them)
+        total_safety_net = liquid_cash + (portfolio_val * 0.8)
+            
+        total_nw = liquid_cash + portfolio_val - debt
+
+        # 2. Spending Analysis (Smart Burn Rate)
+        avg_monthly_burn = 0
+        survival_burn = 0
+        top_wants = "No data"
+        suspicious_txns = "None"
+        
+        if not st.session_state.expenses.empty:
+            df = st.session_state.expenses.copy()
+            
+            # Filter for Spendings (Exclude Income, Investments, and One-Time)
+            # We exclude 'Asset' and 'One-Time' from the monthly burn calculation
+            expenses = df[
+                (df['Amount'] < 0) & 
+                (df['Category'].isin(['Needs', 'Wants']))
+            ]
+            expenses['Amount'] = expenses['Amount'].abs()
+            
+            # --- ANOMALY DETECTION (The "Whale" Filter) ---
+            # Identify transactions > ₹30,000. 
+            # We exclude these from the "Burn Rate" math but show them to AI.
+            whales_mask = expenses['Amount'] > 30000
+            whales = expenses[whales_mask]
+            
+            # "Normal" Expenses (Recurring) used for Runway calculation
+            normal_expenses = expenses[~whales_mask]
+            
+            if not whales.empty:
+                suspicious_txns = whales[['Date', 'Description', 'Amount', 'Category']].to_string(index=False)
+
+            # Calculate Monthly Averages on NORMAL expenses only
+            if not normal_expenses.empty:
+                normal_expenses['Month'] = normal_expenses['Date'].dt.to_period('M')
+                
+                # Lifestyle Burn (Needs + Wants) - Use Median to ignore small spikes
+                monthly_lifestyle = normal_expenses.groupby('Month')['Amount'].sum()
+                avg_monthly_burn = monthly_lifestyle.median()
+                if pd.isna(avg_monthly_burn): avg_monthly_burn = monthly_lifestyle.mean()
+                
+                # Survival Burn (Needs Only)
+                needs_only = normal_expenses[normal_expenses['Category'] == 'Needs']
+                if not needs_only.empty:
+                    monthly_survival = needs_only.groupby('Month')['Amount'].sum()
+                    survival_burn = monthly_survival.median()
+            
+            # Top Categories (from all data)
+            cat_group = expenses.groupby('Category')['Amount'].sum().sort_values(ascending=False).head(5)
+            top_wants = cat_group.to_string()
+
+        # 3. Runway Calculation (using safety net)
+        runway_lifestyle = "Infinite"
+        runway_survival = "Infinite"
+        
+        if avg_monthly_burn > 0:
+            runway_lifestyle = round(total_safety_net / avg_monthly_burn, 1)
+        
+        if survival_burn > 0:
+            runway_survival = round(total_safety_net / survival_burn, 1)
+
+        summary = f"""
+        FINANCIAL VITALS:
+        - Total Net Worth: ₹{total_nw:,.2f}
+        - Liquid Cash: ₹{liquid_cash:,.2f}
+        - Portfolio Value: ₹{portfolio_val:,.2f}
+        - Safety Net (Cash + 80% Portfolio): ₹{total_safety_net:,.2f}
+        
+        CASH FLOW (Normal Monthly):
+        - Typical Burn (Needs+Wants): ₹{avg_monthly_burn:,.2f} / month
+        - 🔴 Lifestyle Runway: {runway_lifestyle} Months
+        - 🟢 Survival Runway (Needs Only): {runway_survival} Months
+        
+        ⚠️ DETECTED ANOMALIES (Excluded from Burn Rate):
+        These large transactions were removed from the monthly average to prevent skewing.
+        The AI should verify if these are Assets or One-Time events:
+        {suspicious_txns}
+        
+        TOP SPENDING CATEGORIES:
+        {top_wants}
+        """
+        return summary
+    except Exception as e:
+        return f"Error generating context: {e}"
+# ============================================================================
 # METRICS CALCULATION
 # ============================================================================
 
@@ -753,6 +869,10 @@ with st.sidebar:
                     st.success(f"Found {len(parsed)} transactions")
                 else:
                     st.error("No valid transactions found")
+    
+    st.divider()
+    st.markdown("### 🤖 AI Config")
+    api_key = st.text_input("Gemini API Key", type="password", help="Get key from Google AI Studio")
 
 # ============================================================================
 # MAIN PAGE - TABBED LAYOUT
@@ -760,10 +880,10 @@ with st.sidebar:
 
 st.title("WealthOS v4")
 
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 Investments"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 Investments", "🤖 AI Brain"])
 
 # ============================================================================
-# TAB 1: DASHBOARD
+# TAB 1: DASHBOARD (Upgraded with Visuals)
 # ============================================================================
 
 with tab1:
@@ -773,40 +893,77 @@ with tab1:
         st.session_state.bank_balance
     )
     
+    # --- METRICS ROW ---
     col1, col2, col3, col4 = st.columns(4)
-    
     with col1:
-        st.metric("True Net Worth", f"₹{net_worth:,.2f}")
-    
+        st.metric("True Net Worth", f"₹{net_worth:,.0f}", delta="Total Wealth")
     with col2:
-        st.metric("Bank Balance", f"₹{st.session_state.bank_balance:,.2f}")
-    
+        st.metric("Liquid Cash", f"₹{st.session_state.bank_balance:,.0f}", help="Cash - Credit Card Debt")
     with col3:
-        st.metric("Portfolio Value", f"₹{portfolio_value:,.2f}")
-    
+        st.metric("Investments", f"₹{portfolio_value:,.0f}", delta="Portfolio")
     with col4:
-        st.metric("Monthly Spend", f"₹{monthly_spend:,.2f}")
+        st.metric("Monthly Burn", f"₹{monthly_spend:,.0f}", delta_color="inverse", delta="Last 30 Days")
     
     st.divider()
     
-    col1, col2 = st.columns(2)
+    # --- VISUALS ROW ---
+    c1, c2 = st.columns([2, 1])
     
-    with col1:
+    with c1:
+        st.subheader("💸 Spending Health")
+        if monthly_spend > 0:
+            # Create a "Burn Bar" - borrowing from React idea
+            # Assuming a simplified "Budget" of Income (if available) or just visualization
+            st.caption("Spending Mix (Needs vs Wants)")
+            
+            # Calculate Needs/Wants split
+            mask = st.session_state.expenses['Amount'] < 0
+            needs = st.session_state.expenses[mask & (st.session_state.expenses['Category'] == 'Needs')]['Amount'].sum()
+            wants = st.session_state.expenses[mask & (st.session_state.expenses['Category'] == 'Wants')]['Amount'].sum()
+            total = abs(needs) + abs(wants)
+            
+            if total > 0:
+                needs_pct = (abs(needs) / total)
+                wants_pct = (abs(wants) / total)
+                
+                st.progress(needs_pct, text=f"Needs: {int(needs_pct*100)}%")
+                st.progress(wants_pct, text=f"Wants: {int(wants_pct*100)}%")
+                
+                if wants_pct > 0.3:
+                    st.warning(f"⚠️ High 'Wants' Usage: {int(wants_pct*100)}% of tracked spending.")
+                else:
+                    st.success("✅ Healthy 'Wants' Ratio (<30%)")
+
+    with c2:
         st.subheader("Savings Rate")
-        st.metric("", f"{savings_rate:.1f}%")
-    
-    with col2:
-        st.subheader("Spending by Category")
-        if not st.session_state.expenses.empty:
-            spend_df = st.session_state.expenses[st.session_state.expenses['Amount'] < 0].copy()
-            if not spend_df.empty:
-                spend_df['Amount'] = spend_df['Amount'].abs()
-                cat_spend = spend_df.groupby('Category')['Amount'].sum().reset_index()
-                st.dataframe(cat_spend, use_container_width=True, hide_index=True)
-            else:
-                st.info("No spending data")
+        if savings_rate > 20:
+            color = "normal"
+        elif savings_rate > 0:
+            color = "off"
         else:
-            st.info("No transactions yet")
+            color = "inverse"
+        st.metric("Savings Rate", f"{savings_rate:.1f}%", delta=f"{savings_rate:.1f}%", delta_color=color)
+
+    st.divider()
+    
+    # --- DEBUG: ANOMALY INSPECTOR ---
+    st.subheader("🕵️‍♀️ Anomaly Inspector")
+    st.caption("These transactions are currently labeled 'Needs' or 'Wants' and are over ₹20k. They are ruining your runway math.")
+    
+    if not st.session_state.expenses.empty:
+        # Filter exactly what the AI sees
+        mask = (st.session_state.expenses['Amount'] < 0) & \
+               (st.session_state.expenses['Category'].isin(['Needs', 'Wants'])) & \
+               (st.session_state.expenses['Amount'].abs() > 20000)
+        
+        anomalies = st.session_state.expenses[mask].copy()
+        
+        if not anomalies.empty:
+            st.dataframe(anomalies, use_container_width=True)
+            st.warning(f"⚠️ Total Anomalies: ₹{anomalies['Amount'].abs().sum():,.2f}")
+            st.info("👉 Go to the 'Transactions' tab and change these to 'Financial' or 'One-Time' to remove them from your Burn Rate.")
+        else:
+            st.success("✅ No large anomalies found in Needs/Wants!")
 
 # ============================================================================
 # TAB 2: TRANSACTIONS
@@ -1034,6 +1191,76 @@ with tab3:
                     st.rerun()
     else:
         st.info("No investments yet. Add assets using the sidebar.")
+
+# ============================================================================
+# TAB 4: AI BRAIN (Stable Version)
+# ============================================================================
+
+with tab4:
+    st.header("🤖 WealthOS Consultant")
+    st.caption("Powered by Google Gemini 1.5 Flash")
+    
+    # --- CONNECTION DOCTOR ---
+    with st.expander("🛠️ Connection Doctor", expanded=False):
+        if st.button("Check API Access"):
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=api_key)
+                models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                st.success(f"✅ API Key Works! Found {len(models)} models.")
+                st.write(models)
+            except Exception as e:
+                st.error(f"Connection Failed: {e}")
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        user_query = st.text_area(
+            "Ask about your finances:", 
+            placeholder="Examples:\n- Review my burn rate.\n- I bought a MacBook for ₹1.6L, how does this impact my runway?\n- Create a generic investment plan."
+        )
+    with col2:
+        st.info("💡 The AI sees your Net Worth summary and Spending patterns. No bank account numbers are shared.")
+        
+    if st.button("Analyze Finances", type="primary"):
+        if not api_key:
+            st.error("Please enter your Gemini API Key in the Sidebar.")
+        else:
+            with st.spinner("Analyzing..."):
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=api_key)
+                    
+                    # 1. Get Context
+                    financial_context = generate_financial_context()
+                    
+                    # 2. Prompt
+                    full_prompt = f"""
+                    Role: You are WealthOS, a ruthless financial advisor.
+                    
+                    DATA SUMMARY:
+                    {financial_context}
+                    
+                    USER QUESTION:
+                    {user_query}
+                    
+                    INSTRUCTIONS:
+                    - Be short and mathematical.
+                    - If the user mentions a large purchase (like a Mac), explain its impact on their 'Runway'.
+                    - Use Markdown.
+                    """
+                    
+                    # 3. Generate (Force 1.5 Flash for stability/speed)
+                    model = genai.GenerativeModel('gemini-2.5-flash')
+                    response = model.generate_content(full_prompt)
+                    
+                    st.markdown("### 🧠 Analysis")
+                    st.markdown(response.text)
+                    
+                except Exception as e:
+                    if "429" in str(e):
+                        st.error("⚠️ Quota Limit Hit. Please wait 30s.")
+                    else:
+                        st.error(f"Error: {e}")
 
 # ============================================================================
 # FOOTER
