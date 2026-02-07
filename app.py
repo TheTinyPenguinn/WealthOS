@@ -6,9 +6,11 @@ and Asset/Liability tracking.
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date
+import numpy as np
 import os
 import shutil
+import json
+from datetime import date, datetime
 import certifi
 
 # Fix SSL certificate issues for yfinance on Mac
@@ -51,17 +53,25 @@ HEADER_KEYWORDS = ["date", "txn date", "description", "narration", "credit", "de
 
 # Auto-Categorization Rules
 KEYWORD_RULES = {
-    "Wants": ["zomato", "swiggy", "uber", "rapido", "ola", "netflix", "amazon", 
-              "pvr", "inox", "cinema", "starbucks", "kfc", "mcdonalds"],
-    "Needs": ["rent", "electricity", "water", "gas", "milk", "grocery", "pharmacy", 
-              "medical", "hospital", "jio", "airtel", "vi ", "act fiber"],
-    "Financial": ["zerodha", "groww", "kite", "sip", "mutual fund", "premium", 
-                  "insurance", "loan", "emi"]
+    "Wants": ["zomato", "swiggy", "blinkit", "zepto", "uber", "ola", "rapido", "namma yatri", 
+              "netflix", "spotify", "apple", "prime", "bookmyshow", "pvr", "inox", "cinema", 
+              "starbucks", "kfc", "mcdonalds", "pizza", "burger", "dunzo", "amazon"],
+    "Needs": ["rent", "electricity", "bescom", "act fiber", "jio", "airtel", "vi ", "water", "gas", 
+              "milk", "grocery", "pharmacy", "medical", "hospital", "petrol", "shell", "hpcl", "bpcl"],
+    "Financial": ["zerodha", "groww", "indmoney", "kite", "cdsl", "nsdl", "angel one", "upstox", 
+                  "lic", "premium", "insurance", "loan", "emi", "credit card payment", "cred", "sip", "mutual fund"]
 }
 
 # ============================================================================
 # PAGE CONFIGURATION
 # ============================================================================
+
+# WinRAR Trust Model
+if 'usage_count' not in st.session_state:
+    st.session_state.usage_count = 0
+st.session_state.usage_count += 1
+if st.session_state.usage_count > 3:
+    st.toast("🔓 WealthOS is free. If it helps you survive, consider buying a license.", icon="💡")
 
 st.set_page_config(
     page_title="WealthOS v4",
@@ -545,13 +555,39 @@ def parse_zerodha_file(uploaded_file):
         return None
 
 # ============================================================================
+# USER-TRAINABLE RULES ENGINE
+# ============================================================================
+
+def load_user_rules():
+    """Load user-defined rules from rules.json."""
+    try:
+        if os.path.exists("rules.json"):
+            with open("rules.json", "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_user_rule(keyword, category):
+    """Save a user-defined rule to rules.json."""
+    try:
+        rules = load_user_rules()
+        rules[keyword.lower()] = category
+        with open("rules.json", "w") as f:
+            json.dump(rules, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+# ============================================================================
 # AUTO-CATEGORIZATION ENGINE (with UPI logic)
 # ============================================================================
 
 def auto_categorize(df, force_overwrite=False):
-    """Auto-categorize transactions with UPI logic."""
+    """Auto-categorize transactions with User-Trainable rules."""
     changes = 0
     df = df.copy()
+    user_rules = load_user_rules()
     
     for idx, row in df.iterrows():
         current_cat = str(row.get('Category', 'Needs')).strip()
@@ -575,11 +611,20 @@ def auto_categorize(df, force_overwrite=False):
                 if '(Verify)' not in desc:
                     new_desc = desc + ' (Verify)'
             else:
-                # Rule 3: Keyword matching
-                for category, keywords in KEYWORD_RULES.items():
-                    if any(kw in desc_lower for kw in keywords):
+                # Rule 3: User Rules (Priority)
+                matched = False
+                for keyword, category in user_rules.items():
+                    if keyword in desc_lower:
                         new_cat = category
+                        matched = True
                         break
+                
+                # Rule 4: Hardcoded Rules (Fallback)
+                if not matched:
+                    for category, keywords in KEYWORD_RULES.items():
+                        if any(kw in desc_lower for kw in keywords):
+                            new_cat = category
+                            break
         
         if new_cat and (new_cat != current_cat or new_desc != desc):
             df.at[idx, 'Category'] = new_cat
@@ -696,6 +741,41 @@ def generate_financial_context():
         return summary
     except Exception as e:
         return f"Error generating context: {e}"
+def analyze_survival_metrics(df, salary):
+    """Calculates survival stats: UPI Bleed, Hourly Wage, Zero Days."""
+    try:
+        # 1. UPI Bleed (Death by Micro-cuts)
+        upi_bleed = 0.0
+        if not df.empty:
+            # Filter: Description contains 'UPI' AND Amount is expense AND Amount < 500
+            mask = (df['Description'].str.contains('UPI', case=False, na=False)) & (df['Amount'] < 0) & (df['Amount'].abs() < 500)
+            upi_bleed = df[mask]['Amount'].abs().sum()
+
+        # 2. Real Hourly Wage (Salary - Needs) / 160 hours
+        monthly_needs = 0.0
+        if not df.empty and 'Category' in df.columns:
+            # Estimate needs from current data (simple sum of 'Needs' category)
+            # For a more robust stat, we might average it, but simple sum is fine for MVP
+            monthly_needs = df[df['Category'] == 'Needs']['Amount'].abs().sum()
+        
+        # Protect against negative wage
+        real_hourly = max(0, (salary - monthly_needs) / 160)
+
+        # 3. Zero Days (Days with ₹0 spend)
+        zero_days = 0
+        if not df.empty:
+            today = pd.Timestamp.now()
+            start_date = today - pd.Timedelta(days=30)
+            # Filter for last 30 days
+            recent_df = df[(df['Date'] >= start_date) & (df['Date'] <= today)]
+            # Count unique days with expenses
+            spend_days = recent_df[recent_df['Amount'] < 0]['Date'].dt.date.nunique()
+            zero_days = 30 - spend_days
+
+        return upi_bleed, real_hourly, zero_days
+    except Exception:
+        return 0.0, 0.0, 0
+
 # ============================================================================
 # METRICS CALCULATION
 # ============================================================================
@@ -796,6 +876,12 @@ with st.sidebar:
     st.caption(f"**Total Assets:** ₹{total_assets:,.2f}")
     st.caption(f"**Total Debt:** ₹{total_debt:,.2f}")
     st.caption(f"**Net Liquid Cash:** ₹{net_liquid_cash:,.2f}")
+    
+    # Monthly Salary Input
+    if 'salary' not in st.session_state:
+        st.session_state.salary = 50000.0
+    salary_input = st.number_input("Monthly Salary (₹)", value=st.session_state.salary, step=5000.0)
+    st.session_state.salary = salary_input
     
     st.divider()
     
@@ -906,6 +992,19 @@ with tab1:
     
     st.divider()
     
+    st.subheader("💀 Survival Stats")
+    upi_bleed, real_hourly, zero_days = analyze_survival_metrics(st.session_state.expenses, st.session_state.salary)
+
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        st.metric("UPI Bleed (Micro-cuts)", f"₹{upi_bleed:,.0f}", help="Total UPI spends < ₹500")
+    with s2:
+        st.metric("Real Hourly Wage", f"₹{real_hourly:,.0f}/hr", help="(Salary - Needs) / 160 hrs")
+    with s3:
+        st.metric("Zero Spend Days", f"{zero_days}", help="Days in last 30 days with ₹0 spend")
+    
+    st.divider()
+    
     # --- VISUALS ROW ---
     c1, c2 = st.columns([2, 1])
     
@@ -1007,6 +1106,21 @@ with tab2:
     
     # Auto-Categorize Section
     st.subheader("⚡ Auto-Categorize")
+    
+    # Teach Mode UI
+    with st.expander("🧠 Teach WealthOS"):
+        teach_keyword = st.text_input("If description contains...", placeholder="e.g., Landlord Name")
+        teach_category = st.selectbox("Mark as...", options=CATEGORIES)
+        if st.button("Add Rule", use_container_width=True):
+            if teach_keyword.strip():
+                if save_user_rule(teach_keyword.strip(), teach_category):
+                    st.success(f"✅ Rule added: '{teach_keyword}' → {teach_category}")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to save rule")
+            else:
+                st.warning("⚠️ Please enter a keyword")
+    
     col1, col2 = st.columns([3, 1])
     with col1:
         force_overwrite = st.checkbox("Force Overwrite", help="Overwrite manually set categories")
@@ -1137,6 +1251,7 @@ with tab3:
             
             # Format portfolio for display
             display_portfolio = portfolio.copy()
+            display_portfolio = display_portfolio.reset_index(drop=True)
             display_portfolio = display_portfolio.rename(columns={
                 'Ticker': 'Ticker',
                 'Type': 'Type',
