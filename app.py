@@ -40,6 +40,30 @@ except ImportError:
     genai = None
 
 # ============================================================================
+# GLOBAL HELPER: LIVE CURRENCY
+# ============================================================================
+
+@st.cache_data(ttl=3600)  # 1 hour cache
+def get_usd_rate():
+    """Get live USD to INR exchange rate with fallback."""
+    try:
+        if YFINANCE_AVAILABLE:
+            ticker = yf.Ticker("USDINR=X")
+            rate = ticker.history(period="1d")['Close'].iloc[-1]
+            return float(rate)
+    except Exception:
+        pass
+    return 87.5  # Fallback rate
+
+# Optional Plotly import for charts
+try:
+    import plotly.graph_objects as go
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+    go = None
+
+# ============================================================================
 # CONSTANTS & CONFIGURATION
 # ============================================================================
 
@@ -63,6 +87,122 @@ KEYWORD_RULES = {
 }
 
 # ============================================================================
+# PERSISTENCE ENGINE
+# ============================================================================
+
+def save_all_data_callback():
+    """Force immediate save of all data to disk."""
+    try:
+        save_data(st.session_state.accounts, st.session_state.fixed_costs, st.session_state.obligations)
+    except Exception as e:
+        st.error(f"Error saving data: {e}")
+
+def load_data():
+    """Load configuration data from CSV files or return defaults."""
+    try:
+        # Create data directory if it doesn't exist
+        os.makedirs('data', exist_ok=True)
+        
+        # Load accounts
+        if os.path.exists('data/accounts.csv'):
+            accounts_df = pd.read_csv('data/accounts.csv')
+            # Ensure Currency column exists
+            if 'Currency' not in accounts_df.columns:
+                accounts_df['Currency'] = 'INR'
+        else:
+            accounts_df = pd.DataFrame({
+                'Account Name': ['Main Savings', 'Salary Acct', 'Credit Card', 'Cash'],
+                'Balance': [0.0, 0.0, 0.0, 0.0],
+                'Currency': ['INR', 'INR', 'INR', 'INR'],
+                'Type': ['Bank/Cash', 'Bank/Cash', 'Credit Card', 'Bank/Cash']
+            })
+
+        # Load fixed costs
+        if os.path.exists('data/fixed_costs.csv'):
+            fixed_df = pd.read_csv('data/fixed_costs.csv')
+        else:
+            fixed_df = pd.DataFrame({
+                'Category': ['Rent', 'Groceries', 'Utilities', 'Transport', 'Entertainment', 'Insurance'],
+                'Amount': [25000, 5000, 1500, 2000, 12000, 2000],
+                'Frequency': ['Monthly', 'Monthly', 'Monthly', 'Monthly', 'Yearly', 'Monthly']
+            })
+
+        # Load obligations
+        if os.path.exists('data/obligations.csv'):
+            obligations_df = pd.read_csv('data/obligations.csv')
+            # Ensure required columns exist
+            required_cols = ['Current Balance', 'Currency', 'Interest Rate (%)']
+            for col in required_cols:
+                if col not in obligations_df.columns:
+                    obligations_df[col] = 0.0 if col in ['Current Balance', 'Interest Rate (%)'] else 'INR'
+        else:
+            obligations_df = pd.DataFrame({
+                'Name': ['Student Loan', 'ELSS SIP', 'Professional Tax'],
+                'Amount': [11000, 5000, 200],
+                'Type': ['Loan', 'SIP', 'Tax'],
+                'Current Balance': [0.0, 0.0, 0.0],
+                'Currency': ['INR', 'INR', 'INR'],
+                'Interest Rate (%)': [10.0, 0.0, 0.0]
+            })
+
+        return accounts_df, fixed_df, obligations_df
+    except Exception as e:
+        st.error(f"Error loading configuration: {e}")
+        # Return defaults if loading fails
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+def save_data(accounts_df, fixed_df, obligations_df):
+    """Save configuration data to CSV files."""
+    try:
+        # Create data directory if it doesn't exist
+        os.makedirs('data', exist_ok=True)
+        
+        accounts_df.to_csv('data/accounts.csv', index=False)
+        fixed_df.to_csv('data/fixed_costs.csv', index=False)
+        obligations_df.to_csv('data/obligations.csv', index=False)
+    except Exception as e:
+        st.error(f"Error saving configuration: {e}")
+
+def load_settings():
+    """Load user settings from JSON file."""
+    try:
+        # Create data directory if it doesn't exist
+        os.makedirs('data', exist_ok=True)
+        
+        if os.path.exists('data/settings.json'):
+            with open('data/settings.json', 'r') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    # Return defaults
+    return {
+        'salary': 50000.0,
+        'api_key': '',
+        'selected_model': 'gemini-1.5-flash'
+    }
+
+def save_settings(salary, api_key, selected_model):
+    """Save user settings to JSON file.
+    
+    SECURITY NOTE: API key is stored in plain text. This is convenient but not secure
+    if you share your laptop. Consider using environment variables or a secure vault
+    for production deployments.
+    """
+    try:
+        # Create data directory if it doesn't exist
+        os.makedirs('data', exist_ok=True)
+        
+        settings = {
+            'salary': salary,
+            'api_key': api_key,
+            'selected_model': selected_model
+        }
+        with open('data/settings.json', 'w') as f:
+            json.dump(settings, f, indent=2)
+    except Exception as e:
+        st.error(f"Error saving settings: {e}")
+
+# ============================================================================
 # PAGE CONFIGURATION
 # ============================================================================
 
@@ -71,11 +211,11 @@ if 'usage_count' not in st.session_state:
     st.session_state.usage_count = 0
 st.session_state.usage_count += 1
 if st.session_state.usage_count > 3:
-    st.toast("🔓 WealthOS is free. If it helps you survive, consider buying a license.", icon="💡")
+    st.toast(" WealthOS is free. If it helps you survive, consider buying a license.", icon="💰")
 
 st.set_page_config(
     page_title="WealthOS v4",
-    page_icon="💰",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -125,6 +265,9 @@ def load_expenses():
             df = pd.read_csv(CSV_FILE)
             if 'Date' in df.columns and not df.empty:
                 df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
+                # Future Date Warning
+                if df['Date'].max() > pd.Timestamp.now() + pd.Timedelta(days=30):
+                    st.toast("⚠️ Future dates detected. Check DD/MM format.")
             for col in ['Date', 'Description', 'Amount', 'Category']:
                 if col not in df.columns:
                     df[col] = None if col != 'Amount' else 0.0
@@ -563,7 +706,13 @@ def load_user_rules():
     try:
         if os.path.exists("rules.json"):
             with open("rules.json", "r") as f:
-                return json.load(f)
+                rules = json.load(f)
+                # Safety check: ensure rules is a dictionary
+                if isinstance(rules, dict):
+                    return rules
+                else:
+                    st.warning("⚠️ rules.json corrupted. Using default rules.")
+                    return {}
     except Exception:
         pass
     return {}
@@ -595,7 +744,13 @@ def auto_categorize(df, force_overwrite=False):
         desc_lower = desc.lower()
         amount = float(row.get('Amount', 0))
         
-        if current_cat != 'Needs' and not force_overwrite:
+        # Safety Lock: Skip manually tagged categories
+        protected_categories = ['One-Time', 'Financial', 'Asset', 'Income']
+        if current_cat in protected_categories:
+            continue
+        
+        # Only apply rules to Needs, Wants, or empty categories
+        if current_cat not in ['Needs', 'Wants', ''] and not force_overwrite:
             continue
         
         new_cat = None
@@ -637,110 +792,32 @@ def auto_categorize(df, force_overwrite=False):
 # AI CONTEXT ENGINE
 # ============================================================================
 
-def generate_financial_context():
-    """Generates a summary string of the user's financial health for the AI."""
+def generate_financial_context(net_worth, liquid_cash, total_debt, true_burn, surplus, fixed_living, total_emi, csv_variable_spend, avg_interest):
+    """Generates a summary string of the user's financial health for the AI using passed arguments."""
     try:
-        # 1. Net Worth Snapshot
-        # Safety check: ensure accounts dataframe exists
-        if 'accounts' in st.session_state and not st.session_state.accounts.empty:
-            liquid_cash = st.session_state.accounts[st.session_state.accounts['Type'] == 'Asset']['Balance'].sum()
-            debt = st.session_state.accounts[st.session_state.accounts['Type'] == 'Liability']['Balance'].sum()
-        else:
-            liquid_cash = st.session_state.bank_balance
-            debt = 0.0
+        salary = st.session_state.get('salary', 0.0)
         
-        portfolio_val = 0
-        if not st.session_state.investments.empty:
-            portfolio_val = (st.session_state.investments['Quantity'] * st.session_state.investments['Avg_Buy_Price']).sum()
-            
-        # --- LOGIC UPDATE: INCLUDE STOCKS IN LIQUIDITY ---
-        # Stocks are liquid (you can sell them in T+1 days).
-        # Real Safety Net = Cash + Portfolio (excluding Locked-in assets like PPF if you had them)
-        total_safety_net = liquid_cash + (portfolio_val * 0.8)
-            
-        total_nw = liquid_cash + portfolio_val - debt
-
-        # 2. Spending Analysis (Smart Burn Rate)
-        avg_monthly_burn = 0
-        survival_burn = 0
-        top_wants = "No data"
-        suspicious_txns = "None"
-        
-        if not st.session_state.expenses.empty:
-            df = st.session_state.expenses.copy()
-            
-            # Filter for Spendings (Exclude Income, Investments, and One-Time)
-            # We exclude 'Asset' and 'One-Time' from the monthly burn calculation
-            expenses = df[
-                (df['Amount'] < 0) & 
-                (df['Category'].isin(['Needs', 'Wants']))
-            ]
-            expenses['Amount'] = expenses['Amount'].abs()
-            
-            # --- ANOMALY DETECTION (The "Whale" Filter) ---
-            # Identify transactions > ₹30,000. 
-            # We exclude these from the "Burn Rate" math but show them to AI.
-            whales_mask = expenses['Amount'] > 30000
-            whales = expenses[whales_mask]
-            
-            # "Normal" Expenses (Recurring) used for Runway calculation
-            normal_expenses = expenses[~whales_mask]
-            
-            if not whales.empty:
-                suspicious_txns = whales[['Date', 'Description', 'Amount', 'Category']].to_string(index=False)
-
-            # Calculate Monthly Averages on NORMAL expenses only
-            if not normal_expenses.empty:
-                normal_expenses['Month'] = normal_expenses['Date'].dt.to_period('M')
-                
-                # Lifestyle Burn (Needs + Wants) - Use Median to ignore small spikes
-                monthly_lifestyle = normal_expenses.groupby('Month')['Amount'].sum()
-                avg_monthly_burn = monthly_lifestyle.median()
-                if pd.isna(avg_monthly_burn): avg_monthly_burn = monthly_lifestyle.mean()
-                
-                # Survival Burn (Needs Only)
-                needs_only = normal_expenses[normal_expenses['Category'] == 'Needs']
-                if not needs_only.empty:
-                    monthly_survival = needs_only.groupby('Month')['Amount'].sum()
-                    survival_burn = monthly_survival.median()
-            
-            # Top Categories (from all data)
-            cat_group = expenses.groupby('Category')['Amount'].sum().sort_values(ascending=False).head(5)
-            top_wants = cat_group.to_string()
-
-        # 3. Runway Calculation (using safety net)
-        runway_lifestyle = "Infinite"
-        runway_survival = "Infinite"
-        
-        if avg_monthly_burn > 0:
-            runway_lifestyle = round(total_safety_net / avg_monthly_burn, 1)
-        
-        if survival_burn > 0:
-            runway_survival = round(total_safety_net / survival_burn, 1)
-
         summary = f"""
-        FINANCIAL VITALS:
-        - Total Net Worth: ₹{total_nw:,.2f}
+        💰 CASH FLOW POWER (MONTHLY):
+        - Income: ₹{salary:,.2f}
+        - Effective Burn: ₹{true_burn:,.2f} (Fixed: ₹{fixed_living:,.2f} + EMI: ₹{total_emi:,.2f} + Variable: ₹{csv_variable_spend:,.2f})
+        - 🚀 INVESTIBLE SURPLUS: ₹{surplus:,.2f} / month ({(surplus/salary*100) if salary > 0 else 0:.1f}%)
+
+        🏦 BALANCE SHEET & DEBT:
         - Liquid Cash: ₹{liquid_cash:,.2f}
-        - Portfolio Value: ₹{portfolio_val:,.2f}
-        - Safety Net (Cash + 80% Portfolio): ₹{total_safety_net:,.2f}
-        
-        CASH FLOW (Normal Monthly):
-        - Typical Burn (Needs+Wants): ₹{avg_monthly_burn:,.2f} / month
-        - 🔴 Lifestyle Runway: {runway_lifestyle} Months
-        - 🟢 Survival Runway (Needs Only): {runway_survival} Months
-        
-        ⚠️ DETECTED ANOMALIES (Excluded from Burn Rate):
-        These large transactions were removed from the monthly average to prevent skewing.
-        The AI should verify if these are Assets or One-Time events:
-        {suspicious_txns}
-        
-        TOP SPENDING CATEGORIES:
-        {top_wants}
+        - Total Debt Balance: ₹{total_debt:,.2f}
+        - True Net Worth: ₹{net_worth:,.2f}
+        - Avg Debt Interest Rate: {avg_interest:.1f}%
+
+        🔮 STRATEGY CHECK:
+        - If Surplus > 0 and Interest Rate > 8%: Consider debt prepayment.
+        - If Surplus > 0 and Interest Rate < 8%: Consider investing surplus.
+        - Focus on reducing high-interest debt first.
         """
         return summary
     except Exception as e:
         return f"Error generating context: {e}"
+
 def analyze_survival_metrics(df, salary):
     """Calculates survival stats: UPI Bleed, Hourly Wage, Zero Days."""
     try:
@@ -776,44 +853,236 @@ def analyze_survival_metrics(df, salary):
     except Exception:
         return 0.0, 0.0, 0
 
+def analyze_subscriptions(df):
+    """Analyze recurring subscriptions/expenses with smart filtering."""
+    try:
+        if df.empty:
+            return pd.DataFrame()
+        
+        # Filter for expenses only, exclude certain categories
+        exclude_categories = ['One-Time', 'Income', 'Asset', 'Financial']
+        expenses = df[(df['Amount'] < 0) & (~df['Category'].isin(exclude_categories))].copy()
+        expenses['Amount'] = expenses['Amount'].abs()
+        expenses['Desc_Prefix'] = expenses['Description'].str[:10].str.lower()
+        expenses['DayOfMonth'] = expenses['Date'].dt.day
+        
+        # Group by description prefix
+        grouped = expenses.groupby('Desc_Prefix').agg({
+            'Amount': ['count', 'sum', 'mean', 'min', 'max'],
+            'Date': ['min', 'max'],
+            'DayOfMonth': ['nunique', 'std']
+        }).round(2)
+        
+        # Flatten column names
+        grouped.columns = ['Count', 'Monthly_Avg', 'Mean', 'Min_Amount', 'Max_Amount', 
+                        'First_Date', 'Last_Date', 'Unique_Days', 'Day_Std']
+        
+        # Check if recurring (3+ transactions across 3+ months, consistent dates)
+        def is_recurring(group):
+            if group['Count'] < 3:
+                return False
+            # Check if spans at least 3 unique months
+            months = pd.to_datetime(group[['First_Date', 'Last_Date']].values.flatten()).dt.to_period('M')
+            return months.nunique() >= 3 and pd.notna(group['Day_Std']) and group['Day_Std'] <= 5
+        
+        grouped['Is_Recurring'] = grouped.apply(is_recurring, axis=1)
+        
+        # Calculate metrics
+        grouped['Yearly_Cost'] = grouped['Monthly_Avg'] * 12
+        grouped['Inflation'] = grouped['Max_Amount'] - grouped['Min_Amount']
+        grouped['Status'] = grouped['Inflation'].apply(lambda x: "⚠️ Price Hike" if x > 50 else "Stable")
+        
+        # Return sorted by yearly cost
+        return grouped[grouped['Is_Recurring'] & (grouped['Yearly_Cost'] > 0)].sort_values('Yearly_Cost', ascending=False)
+        
+    except Exception:
+        return pd.DataFrame()
+
+def plot_runway_impact(liquid_cash, monthly_burn, upi_bleed):
+    """Create runway impact visualization with gain calculation."""
+    try:
+        if monthly_burn <= 0:
+            return None
+            
+        current_runway = liquid_cash / monthly_burn
+        potential_runway = liquid_cash / max(1, (monthly_burn - upi_bleed))
+        gain = potential_runway - current_runway
+        
+        if not PLOTLY_AVAILABLE:
+            return None
+            
+        fig = go.Figure()
+        
+        # Add bars
+        fig.add_trace(go.Bar(
+            y=['Current Path', 'Stop Micro-Spends'],
+            x=[current_runway, potential_runway],
+            orientation='h',
+            marker_color=['#EF553B', '#00CC96'],
+            text=[f'{current_runway:.1f} months', f'{potential_runway:.1f} months'],
+            textposition='auto'
+        ))
+        
+        fig.update_layout(
+            title=f"⚡ Stop Micro-Spends to gain +{gain:.1f} Months of Freedom",
+            xaxis_title='Months',
+            yaxis_title='',
+            height=250,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='white'),
+            showlegend=False
+        )
+        
+        return fig
+        
+    except Exception:
+        return None
+
 # ============================================================================
 # METRICS CALCULATION
 # ============================================================================
 
-def calculate_metrics(expenses_df, investments_df, bank_balance):
-    """Calculate dashboard metrics including True Net Worth."""
-    monthly_spend = 0.0
-    savings_rate = 0.0
-    total_income = 0.0
-    total_spend = 0.0
+def calculate_true_burn(expenses_df, fixed_df, obligations_df, salary):
+    """Calculate true burn rate using hybrid logic."""
+    # Calculate Monthly Floor from Fixed Costs
+    monthly_floor = 0.0
+    if not fixed_df.empty:
+        for _, row in fixed_df.iterrows():
+            if row['Frequency'] == 'Monthly':
+                monthly_floor += row['Amount']
+            elif row['Frequency'] == 'Yearly':
+                monthly_floor += row['Amount'] / 12
     
-    if not expenses_df.empty and 'Amount' in expenses_df.columns:
-        try:
-            total_income = expenses_df[expenses_df['Amount'] > 0]['Amount'].sum()
-            total_spend = abs(expenses_df[expenses_df['Amount'] < 0]['Amount'].sum())
-            
-            current_month = datetime.now().strftime('%Y-%m')
-            df_copy = expenses_df.copy()
-            df_copy['Month'] = pd.to_datetime(df_copy['Date'], errors='coerce').dt.to_period('M').astype(str)
-            monthly_df = df_copy[df_copy['Month'] == current_month]
-            monthly_spend = abs(monthly_df[monthly_df['Amount'] < 0]['Amount'].sum())
-            
-            if total_income > 0:
-                savings_rate = ((total_income - total_spend) / total_income) * 100
-        except Exception:
-            pass
+    # Calculate Monthly Obligations
+    monthly_obligations = 0.0
+    if not obligations_df.empty:
+        monthly_obligations = obligations_df['Amount'].sum()
     
-    # Portfolio value
-    portfolio_value = 0.0
+    # Calculate Variable Spend from CSV
+    csv_wants = 0.0
+    csv_needs = 0.0
+    if not expenses_df.empty:
+        # Filter for last 30 days for variable spend
+        today = pd.Timestamp.now()
+        start_date = today - pd.Timedelta(days=30)
+        recent_df = expenses_df[(pd.to_datetime(expenses_df['Date']) >= start_date) & 
+                              (pd.to_datetime(expenses_df['Date']) <= today)]
+        
+        if not recent_df.empty:
+            csv_wants = abs(recent_df[recent_df['Category'] == 'Wants']['Amount'].sum())
+            csv_needs = abs(recent_df[recent_df['Category'] == 'Needs']['Amount'].sum())
+    
+    # Effective Needs = Higher of (CSV Needs vs Monthly Floor)
+    effective_needs = max(csv_needs, monthly_floor)
+    
+    # Total Monthly Burn = Effective Needs + CSV Wants + Monthly Obligations
+    total_monthly_burn = effective_needs + csv_wants + monthly_obligations
+    
+    # Real Hourly Wage
+    real_hourly_wage = (salary - total_monthly_burn) / 160
+    
+    return total_monthly_burn, monthly_floor, monthly_obligations, effective_needs, csv_wants, real_hourly_wage
+
+def calculate_metrics(expenses_df, investments_df, accounts_df):
+    """Calculate dashboard metrics with Cash Flow First logic."""
+    # Get inputs
+    salary = st.session_state.get('salary', 0.0)
+    fx_rate = get_usd_rate()
+    
+    # 1. FIXED COSTS (Monthly Floor)
+    monthly_floor = 0.0
+    if 'fixed_costs' in st.session_state:
+        for _, row in st.session_state.fixed_costs.iterrows():
+            amt = float(row['Amount'])
+            freq = row['Frequency']
+            if freq == 'Monthly': monthly_floor += amt
+            elif freq == 'Quarterly': monthly_floor += amt / 3
+            elif freq == 'Half-Yearly': monthly_floor += amt / 6
+            elif freq == 'Yearly': monthly_floor += amt / 12
+            
+    # 2. DEBT & OBLIGATIONS
+    total_emi = 0.0
+    monthly_interest_burn = 0.0
+    total_debt_balance = 0.0
+    weighted_rate_sum = 0.0
+    
+    if 'obligations' in st.session_state:
+        for _, row in st.session_state.obligations.iterrows():
+            if row['Type'] == 'Loan':
+                total_emi += float(row['Amount'])
+                principal = float(row['Current Balance'])
+                if row['Currency'] == 'USD': principal *= fx_rate
+                
+                total_debt_balance += principal
+                rate = float(row['Interest Rate (%)'])
+                monthly_interest_burn += (principal * (rate / 100)) / 12
+                weighted_rate_sum += principal * rate
+
+    # Calculate Weighted Avg Interest
+    avg_interest = (weighted_rate_sum / total_debt_balance) if total_debt_balance > 0 else 0.0
+
+    # 3. VARIABLE SPEND (From CSV)
+    csv_variable_spend = 0.0
+    csv_needs = 0.0
+    if not expenses_df.empty:
+        today = pd.Timestamp.now()
+        recent = expenses_df[(pd.to_datetime(expenses_df['Date']) >= today - pd.Timedelta(days=30)) & (pd.to_datetime(expenses_df['Date']) <= today)]
+        if not recent.empty:
+            # Exclude large one-off wants > 20k from "Burn Rate" (treat as anomalies)
+            wants = recent[recent['Category'] == 'Wants']
+            needs = recent[recent['Category'] == 'Needs']
+            csv_variable_spend = abs(wants[wants['Amount'].abs() <= 20000]['Amount'].sum())
+            csv_needs = abs(needs['Amount'].sum())
+
+    # 4. BURN & SURPLUS (Fixed: Add unexpected_needs)
+    unexpected_needs = max(0, csv_needs - monthly_floor)
+    true_burn = monthly_floor + total_emi + csv_variable_spend + unexpected_needs
+    surplus = max(0, salary - true_burn)
+    surplus_margin = (surplus / salary * 100) if salary > 0 else 0
+
+    # 5. NET WORTH ACCOUNTS (Fixed: No Double Counting)
+    bank_cash = 0.0
+    credit_card = 0.0
+    investments_sidebar = 0.0
+    rsu_real_value = 0.0
+    
+    for _, row in accounts_df.iterrows():
+        val = float(row['Balance'])
+        if row.get('Currency') == 'USD': val *= fx_rate
+        
+        t = row['Type']
+        account_name = str(row.get('Account Name', '')).lower()
+        
+        # Strict Loan Segregation: Skip any loan/debt entries
+        if t == 'Loan' or 'loan' in account_name or 'debt' in account_name:
+            st.warning(f"⚠️ '{row.get('Account Name', 'Unknown')}' ignored. Please move loans to 'Financial Obligations'.")
+            continue
+        
+        if t == 'Bank/Cash': bank_cash += val
+        elif t == 'Credit Card': credit_card += val
+        elif 'Investment' in t: 
+            investments_sidebar += val
+            # RSU Logic: Check if account name contains RSU (case-insensitive)
+            if 'rsu' in account_name:
+                rsu_real_value += val
+
+    # 6. PORTFOLIO (Zerodha)
+    csv_portfolio_value = 0.0
     if not investments_df.empty:
         portfolio = get_portfolio_with_prices(investments_df)
         if not portfolio.empty and 'Current_Value' in portfolio.columns:
-            portfolio_value = portfolio['Current_Value'].sum()
-    
-    # True Net Worth = Bank Balance + Portfolio Value
-    net_worth = bank_balance + portfolio_value
-    
-    return net_worth, monthly_spend, savings_rate, portfolio_value
+            csv_portfolio_value = portfolio['Current_Value'].sum()
+
+    # Final Totals (Fixed: Use only total_debt_balance from Obligations)
+    total_portfolio = csv_portfolio_value + investments_sidebar
+    net_liquidity = bank_cash - credit_card 
+    # FIXED: Use total_debt_balance as definitive debt source (no double counting)
+    total_debt_all = total_debt_balance
+    net_worth = (net_liquidity + total_portfolio) - total_debt_balance
+
+    return net_worth, net_liquidity, total_debt_all, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs
+
 
 # ============================================================================
 # SESSION STATE INITIALIZATION
@@ -826,139 +1095,249 @@ if 'investments' not in st.session_state:
     st.session_state.investments = load_investments()
 
 if 'parsed_csv' not in st.session_state:
-    st.session_state.parsed_csv = None
+    st.session_state.parsed_csv = pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Category'])
 
-if 'bank_balance' not in st.session_state:
-    st.session_state.bank_balance = 0.0
+# Load persisted configuration data
+if 'accounts' not in st.session_state:
+    st.session_state.accounts, st.session_state.fixed_costs, st.session_state.obligations = load_data()
+
+# Load persisted user settings
+if 'salary' not in st.session_state:
+    settings = load_settings()
+    st.session_state.salary = settings.get('salary', 50000.0)
+    st.session_state.api_key = settings.get('api_key', '')
+    st.session_state.selected_model = settings.get('selected_model', 'gemini-1.5-flash')
 
 # ============================================================================
-# SIDEBAR
+# SIDEBAR - RICH CLASSIC DESIGN
 # ============================================================================
 
-with st.sidebar:
-    st.title("💰 WealthOS v4")
+st.sidebar.title("💰 WealthOS v5")
+
+# --- SETTINGS (TOP) ---
+st.sidebar.markdown("### ⚙️ Settings")
+
+salary_input = st.sidebar.number_input("Monthly Salary (₹)", value=st.session_state.salary, step=5000.0)
+if salary_input != st.session_state.salary:
+    st.session_state.salary = salary_input
+    save_settings(salary_input, st.session_state.api_key, st.session_state.selected_model)
+
+api_key = st.sidebar.text_input("Gemini API Key", type="password", value=st.session_state.get('api_key', ''), help="Get key from Google AI Studio")
+if api_key != st.session_state.get('api_key', ''):
+    st.session_state.api_key = api_key
+    save_settings(st.session_state.salary, api_key, st.session_state.selected_model)
+
+st.sidebar.divider()
+
+# --- ACCOUNTS & CASH ---
+with st.sidebar.expander("🏦 Accounts & Cash", expanded=True):
+    st.caption("Bank accounts, credit cards, and manual investments (RSU, PPF, Gold).")
+    st.info("📌 **Important**: Loans should now be entered in the 'Financial Obligations' section below to avoid double counting.")
+    # Schema Upgrade: Add Currency column if missing
+    if 'Currency' not in st.session_state.accounts.columns:
+        st.session_state.accounts['Currency'] = 'INR'
     
-    st.divider()
-    
-    # --- MULTI-ACCOUNT TRACKING (Assets vs Liabilities) ---
-    st.header("🏦 Accounts & Cash")
-    
-    if 'accounts' not in st.session_state:
-        st.session_state.accounts = pd.DataFrame({
-            'Account Name': ['Main Savings', 'Salary Acct', 'Credit Card', 'Cash'],
-            'Balance': [0.0, 0.0, 0.0, 0.0],
-            'Type': ['Asset', 'Asset', 'Liability', 'Asset']
+    # Safe Data Migration: Convert old schema to new
+    if 'schema_migrated_v2' not in st.session_state:
+        st.session_state.accounts['Type'] = st.session_state.accounts['Type'].replace({
+            'Asset': 'Bank/Cash',
+            'Liability': 'Loan',
+            'Investment': 'Investment (Non-Zerodha)'
         })
-
-    # Editable Table with Asset/Liability type
+        st.session_state.schema_migrated_v2 = True
+        st.warning("⚠️ Schema Updated: Please manually categorize your RSUs as 'Investment (Non-Zerodha)' and Credit Cards as 'Credit Card'.")
+    
     edited_accounts = st.data_editor(
         st.session_state.accounts,
         column_config={
             "Account Name": st.column_config.TextColumn("Name"),
-            "Balance": st.column_config.NumberColumn("Balance (₹)", format="₹%.2f"),
-            "Type": st.column_config.SelectboxColumn("Type", options=['Asset', 'Liability'], required=True)
+            "Balance": st.column_config.NumberColumn("Balance", format="%.2f"),
+            "Currency": st.column_config.SelectboxColumn("Currency", options=['INR', 'USD']),
+            "Type": st.column_config.SelectboxColumn("Type", options=['Bank/Cash', 'Investment (Non-Zerodha)', 'Credit Card'], required=True, 
+                                                help="For Manual Assets (RSU, PPF, Gold). Do NOT add Zerodha stocks here (they are auto-added). NOTE: Loans should be entered in Financial Obligations section.")
         },
         hide_index=True,
         use_container_width=True,
         num_rows="dynamic",
-        key="accounts_editor"
+        key="accounts_editor",
+        on_change=save_all_data_callback
     )
     st.session_state.accounts = edited_accounts
     
-    # Calculate Assets, Liabilities, and Net Liquid Cash
-    total_assets = edited_accounts[edited_accounts['Type'] == 'Asset']['Balance'].sum()
-    total_debt = edited_accounts[edited_accounts['Type'] == 'Liability']['Balance'].sum()
-    net_liquid_cash = total_assets - total_debt
+    # Calculate distinct accounting buckets with currency conversion (Fixed: No Loan counting)
+    fx_rate = get_usd_rate()
+    bank_cash = 0.0
+    credit_card = 0.0
+    investments_sidebar = 0.0
     
-    st.session_state.bank_balance = net_liquid_cash
+    for _, row in edited_accounts.iterrows():
+        val = row['Balance']
+        if row['Currency'] == 'USD':
+            val = val * fx_rate
+        
+        if row['Type'] == 'Bank/Cash':
+            bank_cash += val
+        elif row['Type'] == 'Credit Card':
+            credit_card += val
+        elif row['Type'] == 'Investment (Non-Zerodha)':
+            investments_sidebar += val
+        # NOTE: Loans are now handled only in Financial Obligations section
+    
+    # Liquid Cash (Runway Fuel) = Bank/Cash - Credit Card
+    liquid_cash = bank_cash - credit_card
+    
+    # Total Debt from Accounts = Credit Card only (Loans handled in Obligations)
+    total_debt = credit_card
+    
+    st.session_state.bank_balance = liquid_cash
     
     # Display summary
-    st.caption(f"**Total Assets:** ₹{total_assets:,.2f}")
+    st.caption(f"**Net Liquidity:** ₹{liquid_cash:,.2f}")
     st.caption(f"**Total Debt:** ₹{total_debt:,.2f}")
-    st.caption(f"**Net Liquid Cash:** ₹{net_liquid_cash:,.2f}")
+    st.caption(f"**Investments:** ₹{investments_sidebar:,.2f}")
+
+st.sidebar.divider()
+
+# --- MONTHLY COMMITMENTS ---
+with st.sidebar.expander("🔒 Monthly Commitments", expanded=True):
+    # Fixed Living Costs
+    with st.expander("🏠 Fixed Living Costs", expanded=True):
+        fixed_costs = st.data_editor(
+            st.session_state.fixed_costs,
+            column_config={
+                "Category": st.column_config.TextColumn("Category"),
+                "Amount": st.column_config.NumberColumn("Amount (₹)", format="₹%.2f"),
+                "Frequency": st.column_config.SelectboxColumn("Frequency", options=['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'])
+            },
+            hide_index=True,
+            use_container_width=True,
+            num_rows="dynamic",
+            key="fixed_costs_editor",
+            on_change=save_all_data_callback
+        )
+        st.session_state.fixed_costs = fixed_costs
     
-    # Monthly Salary Input
-    if 'salary' not in st.session_state:
-        st.session_state.salary = 50000.0
-    salary_input = st.number_input("Monthly Salary (₹)", value=st.session_state.salary, step=5000.0)
-    st.session_state.salary = salary_input
-    
-    st.divider()
-    
-    # Add Transaction Form
-    st.header("➕ Add Transaction")
-    with st.form("add_transaction_form", clear_on_submit=True):
-        txn_date = st.date_input("Date", value=date.today())
-        txn_desc = st.text_input("Description")
-        txn_amount = st.number_input("Amount (₹)", step=100.0, format="%.2f", help="Negative for expense")
-        txn_category = st.selectbox("Category", options=CATEGORIES)
+    # Financial Obligations
+    with st.expander("💳 Financial Obligations (Debt/SIP)", expanded=True):
+        # Schema Migration: Add new columns if missing
+        required_cols = ['Current Balance', 'Currency', 'Interest Rate (%)']
+        for col in required_cols:
+            if col not in st.session_state.obligations.columns:
+                st.session_state.obligations[col] = 0.0 if col in ['Current Balance', 'Interest Rate (%)'] else 'INR'
         
-        if st.form_submit_button("Add Transaction", use_container_width=True):
-            if txn_desc:
-                new_row = pd.DataFrame([{
-                    'Date': pd.Timestamp(txn_date),
-                    'Description': txn_desc,
-                    'Amount': txn_amount,
-                    'Category': txn_category
-                }])
-                st.session_state.expenses = pd.concat(
-                    [st.session_state.expenses, new_row],
-                    ignore_index=True
-                )
-                if save_expenses(st.session_state.expenses):
-                    st.success("Transaction added!")
-                    st.rerun()
-    
-    st.divider()
-    
-    # Add Asset Form
-    st.header("📈 Add Asset")
-    with st.form("add_asset_form", clear_on_submit=True):
-        asset_type = st.selectbox("Type", options=ASSET_TYPES)
-        asset_ticker = st.text_input("Ticker", placeholder="e.g., RELIANCE.NS")
-        asset_qty = st.number_input("Quantity", min_value=0.0, step=1.0, format="%.2f")
-        asset_avg_price = st.number_input("Avg Buy Price (₹)", min_value=0.0, step=10.0, format="%.2f")
+        # Fill NaN values with defaults
+        st.session_state.obligations['Current Balance'].fillna(0.0, inplace=True)
+        st.session_state.obligations['Currency'].fillna('INR', inplace=True)
+        st.session_state.obligations['Interest Rate (%)'].fillna(10.0, inplace=True)
         
-        if st.form_submit_button("Add Asset", use_container_width=True):
-            if asset_ticker and asset_qty > 0:
-                new_asset = pd.DataFrame([{
-                    'Ticker': asset_ticker.upper(),
-                    'Type': asset_type,
-                    'Quantity': asset_qty,
-                    'Avg_Buy_Price': asset_avg_price
-                }])
-                st.session_state.investments = pd.concat(
-                    [st.session_state.investments, new_asset],
-                    ignore_index=True
-                )
-                if save_investments(st.session_state.investments):
-                    st.success("Asset added!")
-                    fetch_live_price.clear()  # Clear cache to fetch new price
-                    st.rerun()
+        obligations = st.data_editor(
+            st.session_state.obligations,
+            column_config={
+                "Name": st.column_config.TextColumn("Name"),
+                "Amount": st.column_config.NumberColumn("Monthly EMI (₹)", format="₹%.2f"),
+                "Type": st.column_config.SelectboxColumn("Type", options=['Loan', 'SIP']),
+                "Current Balance": st.column_config.NumberColumn("Current Balance", format="₹%.2f", help="Remaining amount you owe"),
+                "Currency": st.column_config.SelectboxColumn("Currency", options=['INR', 'USD']),
+                "Interest Rate (%)": st.column_config.NumberColumn("Interest Rate (%)", format="%.1f%%")
+            },
+            hide_index=True,
+            use_container_width=True,
+            num_rows="dynamic",
+            key="obligations_editor",
+            on_change=save_all_data_callback
+        )
+        st.session_state.obligations = obligations
+        
+        # Real-Time Debt Trap Detection
+        for _, row in obligations.iterrows():
+            if row['Type'] == 'Loan':
+                principal = row['Current Balance']
+                if row['Currency'] == 'USD':
+                    principal *= 85.0  # Convert to INR
+                
+                monthly_interest = (principal * (row['Interest Rate (%)'] / 100)) / 12
+                emi = row['Amount']
+                
+                if emi < monthly_interest:
+                    st.error(f"⚠️ Debt Trap Alert: {row['Name']} - EMI (₹{emi:,.0f}) < Monthly Interest (₹{monthly_interest:,.0f})")
+
+st.sidebar.divider()
+
+# --- ACTIONS ---
+st.sidebar.markdown("### 📥 Data Import")
+
+# Add Transaction Form
+st.sidebar.markdown("#### ➕ Add Transaction")
+with st.sidebar.form("add_txn_form", clear_on_submit=True):
+    txn_date = st.date_input("Date", value=datetime.now().date())
+    txn_desc = st.text_input("Description", placeholder="Coffee at Starbucks")
+    txn_amount = st.number_input("Amount", step=100.0, format="%.2f")
+    txn_category = st.selectbox("Category", options=CATEGORIES)
     
-    st.divider()
+    if st.form_submit_button("Add Transaction", use_container_width=True):
+        if txn_desc:
+            new_row = pd.DataFrame([{
+                'Date': pd.Timestamp(txn_date),
+                'Description': txn_desc,
+                'Amount': txn_amount,
+                'Category': txn_category
+            }])
+            st.session_state.expenses = pd.concat(
+                [st.session_state.expenses, new_row],
+                ignore_index=True
+            )
+            if save_expenses(st.session_state.expenses):
+                st.success("Transaction added!")
+                st.rerun()
+
+st.sidebar.divider()
+
+# Add Asset Form
+st.sidebar.markdown("#### 📈 Add Asset")
+with st.sidebar.form("add_asset_form", clear_on_submit=True):
+    asset_type = st.selectbox("Type", options=ASSET_TYPES)
+    asset_ticker = st.text_input("Ticker", placeholder="e.g., RELIANCE.NS")
+    asset_qty = st.number_input("Quantity", min_value=0.0, step=1.0, format="%.2f")
+    asset_avg_price = st.number_input("Avg Buy Price (₹)", min_value=0.0, step=10.0, format="%.2f")
     
-    # CSV Uploader
-    st.header("📤 Import CSV")
-    uploaded_file = st.file_uploader(
-        "Upload Bank Statement",
-        type=['csv'],
-        help="Supports Indian bank CSVs"
-    )
-    
-    if uploaded_file is not None:
-        if st.button("Parse CSV", use_container_width=True):
-            with st.spinner("Parsing..."):
-                parsed = parse_bank_csv(uploaded_file)
-                if parsed is not None and not parsed.empty:
-                    st.session_state.parsed_csv = parsed
-                    st.success(f"Found {len(parsed)} transactions")
-                else:
-                    st.error("No valid transactions found")
-    
-    st.divider()
-    st.markdown("### 🤖 AI Config")
-    api_key = st.text_input("Gemini API Key", type="password", help="Get key from Google AI Studio")
+    if st.form_submit_button("Add Asset", use_container_width=True):
+        if asset_ticker and asset_qty > 0:
+            new_asset = pd.DataFrame([{
+                'Ticker': asset_ticker.upper(),
+                'Type': asset_type,
+                'Quantity': asset_qty,
+                'Avg_Buy_Price': asset_avg_price
+            }])
+            st.session_state.investments = pd.concat(
+                [st.session_state.investments, new_asset],
+                ignore_index=True
+            )
+            if save_investments(st.session_state.investments):
+                st.success("Asset added!")
+                fetch_live_price.clear()  # Clear cache to fetch new price
+                st.rerun()
+
+st.sidebar.divider()
+
+# CSV Uploader
+st.sidebar.markdown("#### 📤 Import CSV")
+uploaded_file = st.file_uploader(
+    "Upload Bank Statement",
+    type=['csv'],
+    help="Supports Indian bank CSVs"
+)
+
+if uploaded_file is not None:
+    if st.button("Parse CSV", use_container_width=True):
+        with st.spinner("Parsing..."):
+            parsed = parse_bank_csv(uploaded_file)
+            if parsed is not None and not parsed.empty:
+                st.session_state.parsed_csv = parsed
+                st.success(f"Found {len(parsed)} transactions")
+            else:
+                st.error("No valid transactions found")
+
+st.sidebar.caption("💾 All data is automatically saved locally")
 
 # ============================================================================
 # MAIN PAGE - TABBED LAYOUT
@@ -973,22 +1352,41 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 I
 # ============================================================================
 
 with tab1:
-    net_worth, monthly_spend, savings_rate, portfolio_value = calculate_metrics(
+    # Calculate Cash Flow First metrics for high-income users
+    salary = st.session_state.get('salary', 0.0)
+    net_worth, liquid_cash, total_debt, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs = calculate_metrics(
         st.session_state.expenses,
         st.session_state.investments,
-        st.session_state.bank_balance
+        st.session_state.accounts
     )
+    
+    # Legacy compatibility for existing code
+    monthly_spend = true_burn
+    savings_rate = surplus_margin
+    fixed_living = monthly_floor  # Now properly calculated
     
     # --- METRICS ROW ---
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("True Net Worth", f"₹{net_worth:,.0f}", delta="Total Wealth")
     with col2:
-        st.metric("Liquid Cash", f"₹{st.session_state.bank_balance:,.0f}", help="Cash - Credit Card Debt")
+        surplus_color = "normal" if surplus > 0 else "inverse"
+        st.metric("Net Liquidity", f"₹{liquid_cash:,.0f}", delta_color=surplus_color, help="Available cash after credit card debt")
     with col3:
-        st.metric("Investments", f"₹{portfolio_value:,.0f}", delta="Portfolio")
+        st.metric("Debt Interest Burn", f"₹{monthly_interest_burn:,.0f}", delta_color="inverse", help="Money lost to interest every month")
     with col4:
-        st.metric("Monthly Burn", f"₹{monthly_spend:,.0f}", delta_color="inverse", delta="Last 30 Days")
+        freedom_rate = surplus / 160 if (surplus > 0 and salary > 0) else 0
+        st.metric("Freedom Rate", f"₹{freedom_rate:,.0f}/hr", help="Real Hourly Savings Rate")
+    
+    # Fixed vs Variable Progress Bar
+    if true_burn > 0:
+        fixed_pct = (fixed_living + total_emi) / true_burn * 100
+        st.progress(fixed_pct/100, text=f"{fixed_pct:.0f}% of your burn is Fixed")
+    
+    # Debug UI: Burn Breakdown
+    st.caption(f"🔍 Burn Breakdown: Fixed ₹{monthly_floor:,.0f} + EMI ₹{total_emi:,.0f} + Variable ₹{csv_variable_spend:,.0f} + Unexpected ₹{unexpected_needs:,.0f}")
+    
+    st.divider()
     
     st.divider()
     
@@ -1005,12 +1403,34 @@ with tab1:
     
     st.divider()
     
+    # --- FUTURE SIMULATION CONTAINER ---
+    st.subheader("🔮 Future Simulation")
+    
+    # Runway Extender Chart
+    runway_chart = plot_runway_impact(liquid_cash, true_burn, upi_bleed)
+    if runway_chart:
+        st.plotly_chart(runway_chart, use_container_width=True)
+    
+    # Detected Recurring Expenses
+    subscriptions = analyze_subscriptions(st.session_state.expenses)
+    if not subscriptions.empty:
+        with st.expander("🔄 Detected Recurring Expenses"):
+            display_cols = ['Count', 'Monthly_Avg', 'Yearly_Cost', 'Status']
+            display_df = subscriptions[display_cols].rename(columns={
+                'Count': 'Transactions',
+                'Monthly_Avg': 'Monthly Avg',
+                'Yearly_Cost': 'Yearly Cost'
+            })
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+    
+    st.divider()
+    
     # --- VISUALS ROW ---
     c1, c2 = st.columns([2, 1])
     
     with c1:
         st.subheader("💸 Spending Health")
-        if monthly_spend > 0:
+        if true_burn > 0:
             # Create a "Burn Bar" - borrowing from React idea
             # Assuming a simplified "Budget" of Income (if available) or just visualization
             st.caption("Spending Mix (Needs vs Wants)")
@@ -1034,14 +1454,13 @@ with tab1:
                     st.success("✅ Healthy 'Wants' Ratio (<30%)")
 
     with c2:
-        st.subheader("Savings Rate")
-        if savings_rate > 20:
-            color = "normal"
-        elif savings_rate > 0:
-            color = "off"
+        st.subheader("Surplus Analysis")
+        if surplus > 0:
+            st.success(f"🚀 Positive Surplus: ₹{surplus:,.0f}/month ({surplus_margin:.1f}%)")
         else:
-            color = "inverse"
-        st.metric("Savings Rate", f"{savings_rate:.1f}%", delta=f"{savings_rate:.1f}%", delta_color=color)
+            st.error(f"📉 Negative Surplus: ₹{surplus:,.0f}/month ({surplus_margin:.1f}%)")
+        
+        st.caption("💡 Use surplus for debt repayment or investments")
 
     st.divider()
     
@@ -1069,6 +1488,30 @@ with tab1:
 # ============================================================================
 
 with tab2:
+    # Search and Filter
+    search_term = st.text_input("🔍 Search Transactions", placeholder="Search by Description or Category...")
+    
+    # Action Buttons
+    btn1, btn2, btn3 = st.columns([3, 1, 1])
+    with btn1:
+        pass  # Empty space for search
+    with btn2:
+        if st.button("🔥 Sort by Amount", use_container_width=True):
+            if not st.session_state.expenses.empty:
+                st.session_state.expenses = st.session_state.expenses.sort_values('Amount', ascending=True)
+                if save_expenses(st.session_state.expenses):
+                    st.success("Sorted by Amount")
+                    st.rerun()
+    with btn3:
+        if st.button("📅 Sort by Recent", use_container_width=True):
+            if not st.session_state.expenses.empty:
+                st.session_state.expenses = st.session_state.expenses.sort_values('Date', ascending=False)
+                if save_expenses(st.session_state.expenses):
+                    st.success("Sorted by Date")
+                    st.rerun()
+    
+    st.divider()
+    
     # CSV Preview Section
     if st.session_state.parsed_csv is not None:
         st.subheader("📥 CSV Preview")
@@ -1153,6 +1596,13 @@ with tab2:
         display_df = st.session_state.expenses.copy()
         if 'Date' in display_df.columns:
             display_df['Date'] = pd.to_datetime(display_df['Date'], errors='coerce')
+        
+        # Apply search filter if provided
+        if search_term:
+            mask = (display_df['Description'].str.contains(search_term, case=False, na=False) | 
+                   display_df['Category'].str.contains(search_term, case=False, na=False))
+            display_df = display_df[mask]
+        
         display_df = display_df.sort_values('Date', ascending=False).reset_index(drop=True)
         
         edited_df = st.data_editor(
@@ -1166,7 +1616,7 @@ with tab2:
                 'Category': st.column_config.SelectboxColumn('Category', options=CATEGORIES, required=True)
             },
             hide_index=True,
-            key="transaction_editor"
+            key="main_txn_editor"
         )
         
         if st.button("Save Changes", type="primary", key="save_transactions"):
@@ -1308,49 +1758,64 @@ with tab3:
         st.info("No investments yet. Add assets using the sidebar.")
 
 # ============================================================================
-# TAB 4: AI BRAIN (Stable Version)
+# ============================================================================
+# TAB 4: AI BRAIN (Fixed & Robust)
 # ============================================================================
 
 with tab4:
     st.header("🤖 WealthOS Consultant")
-    st.caption("Powered by Google Gemini 1.5 Flash")
+    st.caption("Powered by Google Gemini")
     
-    # --- CONNECTION DOCTOR ---
-    with st.expander("🛠️ Connection Doctor", expanded=False):
-        if st.button("Check API Access"):
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=api_key)
-                models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                st.success(f"✅ API Key Works! Found {len(models)} models.")
-                st.write(models)
-            except Exception as e:
-                st.error(f"Connection Failed: {e}")
+    # --- CONNECTION DOCTOR & SETTINGS ---
+    with st.expander("🛠️ AI Settings & Status", expanded=False):
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            if st.button("Check API Access"):
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=st.session_state.api_key)
+                    models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                    st.session_state.available_models = models
+                    st.success(f"✅ Found {len(models)} models!")
+                except Exception as e:
+                    st.error(f"Connection Failed: {e}")
+        
+        with c2:
+            # Model Selector
+            current_model = st.session_state.get('selected_model', 'gemini-1.5-flash')
+            # If we have a list from the check, use it
+            opts = st.session_state.get('available_models', ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash'])
+            
+            new_model = st.selectbox("Select Model", options=opts, index=0 if current_model not in opts else opts.index(current_model))
+            if new_model != current_model:
+                st.session_state.selected_model = new_model
+                save_settings(st.session_state.salary, st.session_state.api_key, new_model)
 
+    # --- CHAT INTERFACE ---
     col1, col2 = st.columns([2, 1])
     with col1:
         user_query = st.text_area(
-            "Ask about your finances:", 
-            placeholder="Examples:\n- Review my burn rate.\n- I bought a MacBook for ₹1.6L, how does this impact my runway?\n- Create a generic investment plan."
+            "Ask the CFO:", 
+            placeholder="Examples:\n- Review my debt strategy.\n- Should I invest my surplus or prepay my loan?\n- Analyze my burn rate."
         )
     with col2:
-        st.info("💡 The AI sees your Net Worth summary and Spending patterns. No bank account numbers are shared.")
+        st.info("💡 The AI analyzes your Net Worth, Surplus, and Debt Interest. No account numbers are shared.")
         
     if st.button("Analyze Finances", type="primary"):
-        if not api_key:
+        if not st.session_state.api_key:
             st.error("Please enter your Gemini API Key in the Sidebar.")
         else:
-            with st.spinner("Analyzing..."):
+            with st.spinner("Thinking..."):
                 try:
                     import google.generativeai as genai
-                    genai.configure(api_key=api_key)
+                    genai.configure(api_key=st.session_state.api_key)
                     
-                    # 1. Get Context
-                    financial_context = generate_financial_context()
+                    # 1. Get Context (Fixed: Pass all required parameters)
+                    financial_context = generate_financial_context(net_worth, liquid_cash, total_debt, true_burn, surplus, fixed_living, total_emi, csv_variable_spend, avg_interest)
                     
                     # 2. Prompt
                     full_prompt = f"""
-                    Role: You are WealthOS, a ruthless financial advisor.
+                    Role: You are a Strategic CFO for a High-Income Earner.
                     
                     DATA SUMMARY:
                     {financial_context}
@@ -1359,16 +1824,17 @@ with tab4:
                     {user_query}
                     
                     INSTRUCTIONS:
-                    - Be short and mathematical.
-                    - If the user mentions a large purchase (like a Mac), explain its impact on their 'Runway'.
+                    - Focus on 'Surplus Deployment'.
+                    - Compare Investment Returns vs Debt Interest (Avg Rate: {avg_interest:.1f}%).
+                    - Be mathematical and direct.
                     - Use Markdown.
                     """
                     
-                    # 3. Generate (Force 1.5 Flash for stability/speed)
-                    model = genai.GenerativeModel('gemini-2.5-flash')
+                    # 3. Generate
+                    model = genai.GenerativeModel(st.session_state.selected_model)
                     response = model.generate_content(full_prompt)
                     
-                    st.markdown("### 🧠 Analysis")
+                    st.markdown("### 🧠 CFO Analysis")
                     st.markdown(response.text)
                     
                 except Exception as e:
@@ -1376,6 +1842,7 @@ with tab4:
                         st.error("⚠️ Quota Limit Hit. Please wait 30s.")
                     else:
                         st.error(f"Error: {e}")
+
 
 # ============================================================================
 # FOOTER
