@@ -12,6 +12,7 @@ import shutil
 import json
 from datetime import date, datetime
 import certifi
+import db  # Supabase integration
 
 # Fix SSL certificate issues for yfinance on Mac
 os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -87,229 +88,145 @@ KEYWORD_RULES = {
 }
 
 # ============================================================================
-# PERSISTENCE ENGINE
+# PERSISTENCE ENGINE (Refactored for Supabase)
 # ============================================================================
 
 def save_all_data_callback():
-    """Force immediate save of all data to disk."""
-    try:
-        save_data(st.session_state.accounts, st.session_state.fixed_costs, st.session_state.obligations)
-    except Exception as e:
-        st.error(f"Error saving data: {e}")
-
-def load_data():
-    """Load configuration data from CSV files or return defaults."""
-    try:
-        # Create data directory if it doesn't exist
-        os.makedirs('data', exist_ok=True)
-        
-        # Load accounts
-        if os.path.exists('data/accounts.csv'):
-            accounts_df = pd.read_csv('data/accounts.csv')
-            # Ensure Currency column exists
-            if 'Currency' not in accounts_df.columns:
-                accounts_df['Currency'] = 'INR'
-        else:
-            accounts_df = pd.DataFrame({
-                'Account Name': ['Main Savings', 'Salary Acct', 'Credit Card', 'Cash'],
-                'Balance': [0.0, 0.0, 0.0, 0.0],
-                'Currency': ['INR', 'INR', 'INR', 'INR'],
-                'Type': ['Bank/Cash', 'Bank/Cash', 'Credit Card', 'Bank/Cash']
-            })
-
-        # Load fixed costs
-        if os.path.exists('data/fixed_costs.csv'):
-            fixed_df = pd.read_csv('data/fixed_costs.csv')
-        else:
-            fixed_df = pd.DataFrame({
-                'Category': ['Rent', 'Groceries', 'Utilities', 'Transport', 'Entertainment', 'Insurance'],
-                'Amount': [25000, 5000, 1500, 2000, 12000, 2000],
-                'Frequency': ['Monthly', 'Monthly', 'Monthly', 'Monthly', 'Yearly', 'Monthly']
-            })
-
-        # Load obligations
-        if os.path.exists('data/obligations.csv'):
-            obligations_df = pd.read_csv('data/obligations.csv')
-            # Ensure required columns exist
-            required_cols = ['Current Balance', 'Currency', 'Interest Rate (%)']
-            for col in required_cols:
-                if col not in obligations_df.columns:
-                    obligations_df[col] = 0.0 if col in ['Current Balance', 'Interest Rate (%)'] else 'INR'
-        else:
-            obligations_df = pd.DataFrame({
-                'Name': ['Student Loan', 'ELSS SIP', 'Professional Tax'],
-                'Amount': [11000, 5000, 200],
-                'Type': ['Loan', 'SIP', 'Tax'],
-                'Current Balance': [0.0, 0.0, 0.0],
-                'Currency': ['INR', 'INR', 'INR'],
-                'Interest Rate (%)': [10.0, 0.0, 0.0]
-            })
-
-        return accounts_df, fixed_df, obligations_df
-    except Exception as e:
-        st.error(f"Error loading configuration: {e}")
-        # Return defaults if loading fails
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-def save_data(accounts_df, fixed_df, obligations_df):
-    """Save configuration data to CSV files."""
-    try:
-        # Create data directory if it doesn't exist
-        os.makedirs('data', exist_ok=True)
-        
-        accounts_df.to_csv('data/accounts.csv', index=False)
-        fixed_df.to_csv('data/fixed_costs.csv', index=False)
-        obligations_df.to_csv('data/obligations.csv', index=False)
-    except Exception as e:
-        st.error(f"Error saving configuration: {e}")
-
-def load_settings():
-    """Load user settings from JSON file."""
-    try:
-        # Create data directory if it doesn't exist
-        os.makedirs('data', exist_ok=True)
-        
-        if os.path.exists('data/settings.json'):
-            with open('data/settings.json', 'r') as f:
-                return json.load(f)
-    except Exception:
-        pass
-    # Return defaults
-    return {
-        'salary': 50000.0,
-        'api_key': '',
-        'selected_model': 'gemini-1.5-flash'
-    }
-
-def save_settings(salary, api_key, selected_model):
-    """Save user settings to JSON file.
+    """Force immediate save of all data to Supabase."""
+    if st.session_state.user is None:
+        return
     
-    SECURITY NOTE: API key is stored in plain text. This is convenient but not secure
-    if you share your laptop. Consider using environment variables or a secure vault
-    for production deployments.
-    """
+    user_id = st.session_state.user.id
     try:
-        # Create data directory if it doesn't exist
-        os.makedirs('data', exist_ok=True)
-        
-        settings = {
-            'salary': salary,
-            'api_key': api_key,
-            'selected_model': selected_model
-        }
-        with open('data/settings.json', 'w') as f:
-            json.dump(settings, f, indent=2)
+        # Optimistic UI is handled by st.data_editor updating session_state
+        # We sync the current state to DB
+        db.sync_accounts(user_id, st.session_state.accounts)
+        db.sync_fixed(user_id, st.session_state.fixed_costs)
+        db.sync_obligations(user_id, st.session_state.obligations)
+        db.sync_investments(user_id, st.session_state.investments)
+        st.toast("✅ Data synced to cloud", icon="☁️")
     except Exception as e:
-        st.error(f"Error saving settings: {e}")
+        st.error(f"Error syncing data: {e}")
 
 # ============================================================================
 # PAGE CONFIGURATION
 # ============================================================================
 
-# WinRAR Trust Model
-if 'usage_count' not in st.session_state:
-    st.session_state.usage_count = 0
-st.session_state.usage_count += 1
-if st.session_state.usage_count > 3:
-    st.toast(" WealthOS is free. If it helps you survive, consider buying a license.", icon="💰")
-
 st.set_page_config(
     page_title="WealthOS v4",
-    page_icon="",
+    page_icon="💰",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ============================================================================
-# DATA ENGINE - FILE I/O WITH SAFETY
+# AUTHENTICATION & STATE MANAGEMENT
 # ============================================================================
 
-def create_backup(file_path):
-    """Create timestamped backup before overwriting."""
-    try:
-        if os.path.exists(file_path):
-            if not os.path.exists(BACKUP_DIR):
-                os.makedirs(BACKUP_DIR)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = os.path.basename(file_path).replace('.csv', '')
-            backup_path = os.path.join(BACKUP_DIR, f"{filename}_backup_{timestamp}.csv")
-            shutil.copy2(file_path, backup_path)
-            return backup_path
-    except Exception as e:
-        st.warning(f"Backup failed: {e}")
-    return None
+if 'user' not in st.session_state:
+    st.session_state.user = None
+if 'data_loaded' not in st.session_state:
+    st.session_state.data_loaded = False
 
-def initialize_expenses_csv():
-    """Initialize expenses.csv if missing."""
-    if not os.path.exists(CSV_FILE):
-        try:
-            empty_df = pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Category'])
-            empty_df.to_csv(CSV_FILE, index=False)
-        except Exception as e:
-            st.error(f"Error initializing expenses CSV: {e}")
+def handle_logout():
+    st.session_state.user = None
+    st.session_state.data_loaded = False
+    st.rerun()
 
-def initialize_investments_csv():
-    """Initialize investments.csv if missing."""
-    if not os.path.exists(INVESTMENTS_FILE):
-        try:
-            empty_df = pd.DataFrame(columns=['Ticker', 'Type', 'Quantity', 'Avg_Buy_Price'])
-            empty_df.to_csv(INVESTMENTS_FILE, index=False)
-        except Exception as e:
-            st.error(f"Error initializing investments CSV: {e}")
+# --- AUTH UI ---
+if st.session_state.user is None:
+    st.title("🔐 WealthOS Cloud")
+    auth_tab1, auth_tab2 = st.tabs(["Login", "Sign Up"])
+    
+    with auth_tab1:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            if st.form_submit_button("Login", use_container_width=True):
+                try:
+                    res = db.supabase.auth.sign_in_with_password({"email": email, "password": password})
+                    st.session_state.user = res.user
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Login failed: {e}")
+    
+    with auth_tab2:
+        with st.form("signup_form"):
+            new_email = st.text_input("Email")
+            new_password = st.text_input("Password", type="password")
+            if st.form_submit_button("Sign Up", use_container_width=True):
+                try:
+                    res = db.supabase.auth.sign_up({"email": new_email, "password": new_password})
+                    st.success("Check your email for confirmation!")
+                except Exception as e:
+                    st.error(f"Signup failed: {e}")
+    st.stop()
 
-def load_expenses():
-    """Load expenses from CSV with error handling."""
-    try:
-        initialize_expenses_csv()
-        if os.path.exists(CSV_FILE):
-            df = pd.read_csv(CSV_FILE)
-            if 'Date' in df.columns and not df.empty:
-                df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
-                # Future Date Warning
-                if df['Date'].max() > pd.Timestamp.now() + pd.Timedelta(days=30):
-                    st.toast("⚠️ Future dates detected. Check DD/MM format.")
-            for col in ['Date', 'Description', 'Amount', 'Category']:
-                if col not in df.columns:
-                    df[col] = None if col != 'Amount' else 0.0
-            return df
-        return pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Category'])
-    except Exception as e:
-        st.error(f"Error loading expenses: {e}")
-        return pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Category'])
+# --- DATA LOADING (Strict Supabase) ---
+user = st.session_state.user
+
+if not st.session_state.data_loaded:
+    with st.spinner("Loading your vault..."):
+        data = db.load_all_data(user.id)
+        if data:
+            st.session_state.accounts = data["accounts"]
+            st.session_state.fixed_costs = data["fixed_costs"]
+            st.session_state.obligations = data["obligations"]
+            st.session_state.investments = data["investments"]
+            st.session_state.expenses = data["expenses"]
+            
+            settings = data["settings"]
+            st.session_state.salary = settings.get("salary", 0.0)
+            st.session_state.api_key = settings.get("api_key", "")
+            st.session_state.selected_model = settings.get("selected_model", "gemini-1.5-flash")
+            
+            # Global configuration for Gemini
+            if st.session_state.api_key:
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=st.session_state.api_key)
+                except Exception as e:
+                    st.error(f"Failed to configure Gemini: {e}")
+            
+            st.session_state.data_loaded = True
+            st.rerun()
+
+# Sidebar Logout
+if st.sidebar.button("🚪 Logout"):
+    handle_logout()
+
+st.sidebar.divider()
+
+# ============================================================================
+# DATA ENGINE - SUPABASE WRAPPERS
+# ============================================================================
 
 def save_expenses(df):
-    """Save expenses to CSV with backup."""
+    """Wrapper for legacy calls, now uses Supabase clear-and-replace."""
     try:
-        create_backup(CSV_FILE)
-        df_save = df.copy()
-        if 'Date' in df_save.columns and not df_save.empty:
-            df_save['Date'] = pd.to_datetime(df_save['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-        df_save.to_csv(CSV_FILE, index=False)
+        user_id = st.session_state.user.id
+        db.supabase.table("expenses").delete().eq("user_id", user_id).execute()
+        payload = []
+        for _, row in df.iterrows():
+            payload.append({
+                "user_id": user_id,
+                "date": pd.to_datetime(row["Date"]).isoformat(),
+                "description": row["Description"],
+                "amount": float(row["Amount"]),
+                "category": row["Category"]
+            })
+        if payload:
+            for i in range(0, len(payload), 500):
+                db.supabase.table("expenses").insert(payload[i:i+500]).execute()
         return True
     except Exception as e:
         st.error(f"Error saving expenses: {e}")
         return False
 
-def load_investments():
-    """Load investments from CSV with error handling."""
-    try:
-        initialize_investments_csv()
-        if os.path.exists(INVESTMENTS_FILE):
-            df = pd.read_csv(INVESTMENTS_FILE)
-            for col in ['Ticker', 'Type', 'Quantity', 'Avg_Buy_Price']:
-                if col not in df.columns:
-                    df[col] = '' if col in ['Ticker', 'Type'] else 0.0
-            return df
-        return pd.DataFrame(columns=['Ticker', 'Type', 'Quantity', 'Avg_Buy_Price'])
-    except Exception as e:
-        st.error(f"Error loading investments: {e}")
-        return pd.DataFrame(columns=['Ticker', 'Type', 'Quantity', 'Avg_Buy_Price'])
-
 def save_investments(df):
-    """Save investments to CSV with backup."""
+    """Wrapper for legacy calls, now uses Supabase snapshot sync."""
     try:
-        create_backup(INVESTMENTS_FILE)
-        df.to_csv(INVESTMENTS_FILE, index=False)
+        db.sync_investments(st.session_state.user.id, df)
         return True
     except Exception as e:
         st.error(f"Error saving investments: {e}")
@@ -1088,44 +1005,117 @@ def calculate_metrics(expenses_df, investments_df, accounts_df):
 # SESSION STATE INITIALIZATION
 # ============================================================================
 
-if 'expenses' not in st.session_state:
-    st.session_state.expenses = load_expenses()
-
-if 'investments' not in st.session_state:
-    st.session_state.investments = load_investments()
-
 if 'parsed_csv' not in st.session_state:
     st.session_state.parsed_csv = pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Category'])
 
-# Load persisted configuration data
-if 'accounts' not in st.session_state:
-    st.session_state.accounts, st.session_state.fixed_costs, st.session_state.obligations = load_data()
-
-# Load persisted user settings
-if 'salary' not in st.session_state:
-    settings = load_settings()
-    st.session_state.salary = settings.get('salary', 50000.0)
-    st.session_state.api_key = settings.get('api_key', '')
-    st.session_state.selected_model = settings.get('selected_model', 'gemini-1.5-flash')
-
-# ============================================================================
-# SIDEBAR - RICH CLASSIC DESIGN
-# ============================================================================
-
+# --- SIDEBAR - RICH CLASSIC DESIGN ---
 st.sidebar.title("💰 WealthOS v5")
 
-# --- SETTINGS (TOP) ---
-st.sidebar.markdown("### ⚙️ Settings")
+# 1. Metric Summary
+total_portfolio = 0.0
+if not st.session_state.investments.empty:
+    # Assuming calculate_metrics or similar is available or we use simpler logic for sidebar
+    # For now, use basic sum if detailed metrics aren't ready
+    total_portfolio = (st.session_state.investments['Quantity'] * st.session_state.investments['Avg_Buy_Price']).sum()
 
-salary_input = st.sidebar.number_input("Monthly Salary (₹)", value=st.session_state.salary, step=5000.0)
-if salary_input != st.session_state.salary:
-    st.session_state.salary = salary_input
-    save_settings(salary_input, st.session_state.api_key, st.session_state.selected_model)
+liquid_cash = 0.0
+total_debt_balance = 0.0
+if not st.session_state.accounts.empty:
+    liquid_cash = st.session_state.accounts[st.session_state.accounts['Type'] != 'Credit Card']['Balance'].sum()
+    total_debt_balance = st.session_state.accounts[st.session_state.accounts['Type'] == 'Credit Card']['Balance'].sum()
 
-api_key = st.sidebar.text_input("Gemini API Key", type="password", value=st.session_state.get('api_key', ''), help="Get key from Google AI Studio")
-if api_key != st.session_state.get('api_key', ''):
-    st.session_state.api_key = api_key
-    save_settings(st.session_state.salary, api_key, st.session_state.selected_model)
+m1, m2, m3 = st.sidebar.columns(3)
+with m1:
+    st.caption("Net Liquidity")
+    st.markdown(f"**₹{liquid_cash:,.0f}**")
+with m2:
+    st.caption("Total Debt")
+    st.markdown(f"**₹{total_debt_balance:,.0f}**")
+with m3:
+    st.caption("Investments")
+    st.markdown(f"**₹{total_portfolio:,.0f}**")
+
+st.sidebar.divider()
+
+# 2. ⚙️ Configuration
+with st.sidebar.expander("⚙️ Configuration", expanded=True):
+    salary_input = st.number_input("Monthly Salary (₹)", value=float(st.session_state.get('salary', 0.0)), step=5000.0, format="%.2f")
+    if salary_input != st.session_state.get('salary', 0.0):
+        st.session_state.salary = salary_input
+        db.sync_settings(st.session_state.user.id, salary_input, st.session_state.api_key, st.session_state.selected_model)
+        st.toast("✅ Salary updated", icon="💰")
+
+    api_key_input = st.text_input("Gemini API Key", type="password", value=st.session_state.get('api_key', ''), help="Get key from Google AI Studio")
+    if api_key_input != st.session_state.get('api_key', ''):
+        st.session_state.api_key = api_key_input
+        db.sync_settings(st.session_state.user.id, st.session_state.salary, api_key_input, st.session_state.selected_model)
+        st.toast("✅ API Key updated", icon="🔑")
+
+# 3. 🏠 Core Data
+with st.sidebar.expander("� Fixed Living Costs", expanded=False):
+    fixed_costs = st.data_editor(
+        st.session_state.fixed_costs,
+        column_config={
+            "Category": st.column_config.TextColumn("Category"),
+            "Amount": st.column_config.NumberColumn("Amount (₹)", format="₹%.2f"),
+            "Frequency": st.column_config.SelectboxColumn("Frequency", options=['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'])
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="dynamic",
+        key="sidebar_fixed_costs_editor",
+        on_change=save_all_data_callback
+    )
+    st.session_state.fixed_costs = fixed_costs
+
+with st.sidebar.expander("💳 Financial Obligations", expanded=False):
+    obligations = st.data_editor(
+        st.session_state.obligations,
+        column_config={
+            "Name": st.column_config.TextColumn("Name"),
+            "Amount": st.column_config.NumberColumn("Monthly EMI (₹)", format="₹%.2f"),
+            "Type": st.column_config.SelectboxColumn("Type", options=['Loan', 'SIP']),
+            "Current Balance": st.column_config.NumberColumn("Current Balance", format="₹%.2f"),
+            "Currency": st.column_config.SelectboxColumn("Currency", options=['INR', 'USD']),
+            "Interest Rate (%)": st.column_config.NumberColumn("Interest Rate (%)", format="%.1f%%")
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="dynamic",
+        key="sidebar_obligations_editor",
+        on_change=save_all_data_callback
+    )
+    st.session_state.obligations = obligations
+
+# 4. 📣 Feedback Hub
+with st.sidebar.expander("📣 Report Bug / Suggest Idea", expanded=False):
+    with st.form(key="feedback_form", clear_on_submit=True):
+        f_type = st.selectbox("Type", ["🪲 Bug", "💡 Idea", "⚖️ Math Error", "🎨 UI"])
+        f_priority = st.radio("Priority", ["Low", "Med", "High"], horizontal=True)
+        f_details = st.text_area("Details")
+        if st.form_submit_button("Submit Feedback", use_container_width=True):
+            if f_details:
+                # Calculate metrics for metadata
+                net_worth, liquid_cash, total_debt, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs = calculate_metrics(
+                    st.session_state.expenses,
+                    st.session_state.investments,
+                    st.session_state.accounts
+                )
+                metadata = {
+                    "model": st.session_state.get('selected_model'),
+                    "net_worth": net_worth,
+                    "liquid_cash": liquid_cash,
+                    "total_debt": total_debt
+                }
+                if db.insert_feedback(st.session_state.user.id, f_type, f_details, metadata):
+                    st.success("Thanks for the feedback!")
+                else:
+                    st.error("Failed to send feedback.")
+
+# 5. Logout
+st.sidebar.markdown('<div style="margin-top: 30vh;"></div>', unsafe_allow_html=True)
+if st.sidebar.button("🚪 Logout", use_container_width=True):
+    handle_logout()
 
 st.sidebar.divider()
 
@@ -1266,30 +1256,6 @@ st.sidebar.divider()
 # --- ACTIONS ---
 st.sidebar.markdown("### 📥 Data Import")
 
-# Add Transaction Form
-st.sidebar.markdown("#### ➕ Add Transaction")
-with st.sidebar.form("add_txn_form", clear_on_submit=True):
-    txn_date = st.date_input("Date", value=datetime.now().date())
-    txn_desc = st.text_input("Description", placeholder="Coffee at Starbucks")
-    txn_amount = st.number_input("Amount", step=100.0, format="%.2f")
-    txn_category = st.selectbox("Category", options=CATEGORIES)
-    
-    if st.form_submit_button("Add Transaction", use_container_width=True):
-        if txn_desc:
-            new_row = pd.DataFrame([{
-                'Date': pd.Timestamp(txn_date),
-                'Description': txn_desc,
-                'Amount': txn_amount,
-                'Category': txn_category
-            }])
-            st.session_state.expenses = pd.concat(
-                [st.session_state.expenses, new_row],
-                ignore_index=True
-            )
-            if save_expenses(st.session_state.expenses):
-                st.success("Transaction added!")
-                st.rerun()
-
 st.sidebar.divider()
 
 # Add Asset Form
@@ -1312,32 +1278,15 @@ with st.sidebar.form("add_asset_form", clear_on_submit=True):
                 [st.session_state.investments, new_asset],
                 ignore_index=True
             )
-            if save_investments(st.session_state.investments):
-                st.success("Asset added!")
-                fetch_live_price.clear()  # Clear cache to fetch new price
-                st.rerun()
+            # Sync to Supabase
+            db.sync_investments(st.session_state.user.id, st.session_state.investments)
+            st.success("✅ Asset added to cloud")
+            fetch_live_price.clear()  # Clear cache to fetch new price
+            st.rerun()
 
 st.sidebar.divider()
 
-# CSV Uploader
-st.sidebar.markdown("#### 📤 Import CSV")
-uploaded_file = st.file_uploader(
-    "Upload Bank Statement",
-    type=['csv'],
-    help="Supports Indian bank CSVs"
-)
-
-if uploaded_file is not None:
-    if st.button("Parse CSV", use_container_width=True):
-        with st.spinner("Parsing..."):
-            parsed = parse_bank_csv(uploaded_file)
-            if parsed is not None and not parsed.empty:
-                st.session_state.parsed_csv = parsed
-                st.success(f"Found {len(parsed)} transactions")
-            else:
-                st.error("No valid transactions found")
-
-st.sidebar.caption("💾 All data is automatically saved locally")
+st.sidebar.caption("☁️ WealthOS Cloud Connection Active")
 
 # ============================================================================
 # MAIN PAGE - TABBED LAYOUT
@@ -1360,6 +1309,18 @@ with tab1:
         st.session_state.accounts
     )
     
+    # --- EMPTY STATE ONBOARDING ---
+    if net_worth == 0 and st.session_state.expenses.empty:
+        st.info("👋 **Welcome to WealthOS!** It looks like you're just getting started.")
+        st.markdown("""
+        To begin tracking your finances, please use the **Sidebar** to add your data:
+        1.  **⚙️ Configuration**: Set your monthly salary and Gemini API key.
+        2.  **🏦 Accounts & Cash**: Add your bank balances and manual assets.
+        3.  **🏠 Fixed Living Costs**: List your recurring monthly expenses.
+        4.  **💸 Transactions Tab**: Import your bank statement to see your spending patterns.
+        """)
+        st.stop()
+    
     # Legacy compatibility for existing code
     monthly_spend = true_burn
     savings_rate = surplus_margin
@@ -1377,6 +1338,33 @@ with tab1:
     with col4:
         freedom_rate = surplus / 160 if (surplus > 0 and salary > 0) else 0
         st.metric("Freedom Rate", f"₹{freedom_rate:,.0f}/hr", help="Real Hourly Savings Rate")
+    
+    # --- QUICK ADD TRANSACTION (MOBILE UX) ---
+    with st.expander("➕ Quick Add Transaction", expanded=False):
+        with st.form("quick_add_txn", clear_on_submit=True):
+            q_date = st.date_input("Date", value=datetime.now().date())
+            q_desc = st.text_input("Description", placeholder="Coffee, Rent, etc.")
+            q_amount = st.number_input("Amount", step=100.0, format="%.2f")
+            q_cat = st.selectbox("Category", options=CATEGORIES)
+            
+            if st.form_submit_button("Add Transaction", use_container_width=True):
+                if q_desc:
+                    try:
+                        # Optimistic UI update
+                        new_txn = pd.DataFrame([{
+                            'Date': pd.Timestamp(q_date),
+                            'Description': q_desc,
+                            'Amount': q_amount,
+                            'Category': q_cat
+                        }])
+                        st.session_state.expenses = pd.concat([st.session_state.expenses, new_txn], ignore_index=True)
+                        
+                        # Supabase Sync
+                        db.add_expense(st.session_state.user.id, q_date, q_desc, q_amount, q_cat)
+                        st.success("✅ Transaction added to cloud")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to add transaction: {e}")
     
     # Fixed vs Variable Progress Bar
     if true_burn > 0:
@@ -1488,6 +1476,24 @@ with tab1:
 # ============================================================================
 
 with tab2:
+    # --- CSV UPLOADER (MOBILE UX) ---
+    with st.expander("📤 Import Bank Statement (CSV)", expanded=False):
+        uploaded_file = st.file_uploader(
+            "Upload Bank Statement",
+            type=['csv'],
+            help="Supports Indian bank CSVs",
+            key="tab2_csv_uploader"
+        )
+        if uploaded_file is not None:
+            if st.button("Parse CSV", use_container_width=True):
+                with st.spinner("Parsing..."):
+                    parsed = parse_bank_csv(uploaded_file)
+                    if parsed is not None and not parsed.empty:
+                        st.session_state.parsed_csv = parsed
+                        st.success(f"Found {len(parsed)} transactions")
+                    else:
+                        st.error("No valid transactions found")
+
     # Search and Filter
     search_term = st.text_input("🔍 Search Transactions", placeholder="Search by Description or Category...")
     
@@ -1498,9 +1504,12 @@ with tab2:
     with btn2:
         if st.button("🔥 Sort by Amount", use_container_width=True):
             if not st.session_state.expenses.empty:
-                st.session_state.expenses = st.session_state.expenses.sort_values('Amount', ascending=True)
+                # Sort by absolute magnitude (high-magnitude sorting)
+                st.session_state.expenses = st.session_state.expenses.reindex(
+                    st.session_state.expenses.Amount.abs().sort_values(ascending=False).index
+                )
                 if save_expenses(st.session_state.expenses):
-                    st.success("Sorted by Amount")
+                    st.success("Sorted by Magnitude (Impact)")
                     st.rerun()
     with btn3:
         if st.button("📅 Sort by Recent", use_container_width=True):
@@ -1532,14 +1541,21 @@ with tab2:
                 if unique_new.empty:
                     st.warning("All transactions already exist")
                 else:
-                    st.session_state.expenses = pd.concat(
-                        [st.session_state.expenses, unique_new],
-                        ignore_index=True
-                    )
-                    if save_expenses(st.session_state.expenses):
-                        st.success(f"Added {len(unique_new)} transactions")
+                    try:
+                        # Batch Sync to Supabase
+                        user_id = st.session_state.user.id
+                        for _, row in unique_new.iterrows():
+                            db.add_expense(user_id, row['Date'], row['Description'], row['Amount'], row['Category'])
+                        
+                        st.session_state.expenses = pd.concat(
+                            [st.session_state.expenses, unique_new],
+                            ignore_index=True
+                        )
+                        st.success(f"✅ Added {len(unique_new)} transactions to cloud")
                         st.session_state.parsed_csv = None
                         st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to sync transactions: {e}")
         with col2:
             if st.button("Clear Preview", use_container_width=True):
                 st.session_state.parsed_csv = None
@@ -1574,10 +1590,28 @@ with tab2:
             else:
                 updated_df, changes = auto_categorize(st.session_state.expenses, force_overwrite)
                 if changes > 0:
-                    st.session_state.expenses = updated_df
-                    if save_expenses(updated_df):
-                        st.toast(f"✅ Categorized {changes} transactions!")
+                    try:
+                        user_id = st.session_state.user.id
+                        # Clear and Replace strategy for categorizer
+                        db.supabase.table("expenses").delete().eq("user_id", user_id).execute()
+                        payload = []
+                        for _, row in updated_df.iterrows():
+                            payload.append({
+                                "user_id": user_id,
+                                "date": row["Date"].isoformat(),
+                                "description": row["Description"],
+                                "amount": float(row["Amount"]),
+                                "category": row["Category"]
+                            })
+                        if payload:
+                            for i in range(0, len(payload), 500):
+                                db.supabase.table("expenses").insert(payload[i:i+500]).execute()
+                        
+                        st.session_state.expenses = updated_df
+                        st.toast(f"✅ Categorized {changes} transactions in cloud!")
                         st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to sync categorizations: {e}")
                 else:
                     st.info("No changes needed")
     
@@ -1622,10 +1656,30 @@ with tab2:
         if st.button("Save Changes", type="primary", key="save_transactions"):
             if 'Date' in edited_df.columns:
                 edited_df['Date'] = pd.to_datetime(edited_df['Date'], errors='coerce')
-            st.session_state.expenses = edited_df
-            if save_expenses(st.session_state.expenses):
-                st.success("Changes saved!")
+            
+            try:
+                user_id = st.session_state.user.id
+                # Clear and Replace strategy for expenses table sync
+                db.supabase.table("expenses").delete().eq("user_id", user_id).execute()
+                payload = []
+                for _, row in edited_df.iterrows():
+                    payload.append({
+                        "user_id": user_id,
+                        "date": row["Date"].isoformat(),
+                        "description": row["Description"],
+                        "amount": float(row["Amount"]),
+                        "category": row["Category"]
+                    })
+                if payload:
+                    # Supabase handles batching
+                    for i in range(0, len(payload), 500):
+                        db.supabase.table("expenses").insert(payload[i:i+500]).execute()
+                
+                st.session_state.expenses = edited_df
+                st.success("✅ Changes synced to cloud!")
                 st.rerun()
+            except Exception as e:
+                st.error(f"Failed to sync changes: {e}")
     else:
         st.info("No transactions yet. Import a bank statement using the sidebar.")
 
@@ -1653,8 +1707,9 @@ with tab3:
                     combined = pd.concat([st.session_state.investments, z_df])
                     # Keep the LAST occurrence (the new one)
                     st.session_state.investments = combined.drop_duplicates(subset=['Ticker'], keep='last')
-                    save_investments(st.session_state.investments)
-                    st.success("Portfolio merged successfully!")
+                    # Sync to Supabase
+                    db.sync_investments(st.session_state.user.id, st.session_state.investments)
+                    st.success("✅ Portfolio merged to cloud!")
                     fetch_live_price.clear()
                     st.rerun()
 
@@ -1667,8 +1722,9 @@ with tab3:
                     # Combine preserved assets with new Zerodha import
                     new_state = pd.concat([preserved, z_df])
                     st.session_state.investments = new_state
-                    save_investments(st.session_state.investments)
-                    st.success("Stocks replaced! Crypto/Gold preserved.")
+                    # Sync to Supabase
+                    db.sync_investments(st.session_state.user.id, st.session_state.investments)
+                    st.success("✅ Stocks replaced in cloud! Crypto/Gold preserved.")
                     fetch_live_price.clear()
                     st.rerun()
     
@@ -1750,10 +1806,11 @@ with tab3:
             
             if st.button("Save Holdings", type="primary", key="save_investments"):
                 st.session_state.investments = edited_inv
-                if save_investments(st.session_state.investments):
-                    st.success("Holdings saved!")
-                    fetch_live_price.clear()
-                    st.rerun()
+                # Sync to Supabase
+                db.sync_investments(st.session_state.user.id, st.session_state.investments)
+                st.success("✅ Holdings synced to cloud")
+                fetch_live_price.clear()
+                st.rerun()
     else:
         st.info("No investments yet. Add assets using the sidebar.")
 
@@ -1781,15 +1838,15 @@ with tab4:
                     st.error(f"Connection Failed: {e}")
         
         with c2:
-            # Model Selector
+            # Model Selector persistence (Refactored for Supabase)
             current_model = st.session_state.get('selected_model', 'gemini-1.5-flash')
-            # If we have a list from the check, use it
             opts = st.session_state.get('available_models', ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash'])
             
             new_model = st.selectbox("Select Model", options=opts, index=0 if current_model not in opts else opts.index(current_model))
             if new_model != current_model:
                 st.session_state.selected_model = new_model
-                save_settings(st.session_state.salary, st.session_state.api_key, new_model)
+                db.sync_settings(st.session_state.user.id, st.session_state.salary, st.session_state.api_key, new_model)
+                st.toast("✅ Model updated", icon="🤖")
 
     # --- CHAT INTERFACE ---
     col1, col2 = st.columns([2, 1])
