@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from supabase import create_client, Client
+from supabase import get_supabase_client_with_retry
 from decimal import Decimal
 
 # Initialize Supabase client
@@ -23,7 +23,22 @@ def get_supabase_client():
         st.error(f"Failed to initialize Supabase client: {e}")
         st.stop()
 
-supabase = get_supabase_client()
+# Initialize client with retry for Streamlit Cloud environment
+def get_supabase_client_with_retry():
+    """Initialize Supabase client with retry logic for Streamlit Cloud environment issues."""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return get_supabase_client()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                st.error(f"Failed to initialize Supabase after {max_retries} attempts: {e}")
+                st.stop()
+            else:
+                st.warning(f"Attempt {attempt + 1}/{max_retries} failed, retrying...")
+    return None
+
+supabase = get_supabase_client_with_retry()
 
 def ensure_dataframe_schema(df, columns, types=None):
     """Ensure dataframe has correct columns and types, stripping timezones and converting Decimals."""
