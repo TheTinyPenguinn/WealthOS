@@ -6,12 +6,22 @@ from decimal import Decimal
 # Initialize Supabase client
 @st.cache_resource
 def get_supabase_client():
-    url = st.secrets.get("SUPABASE_URL")
-    key = st.secrets.get("SUPABASE_KEY")
+    # Use st.secrets with fallback to empty string to avoid KeyError
+    url = st.secrets.get("SUPABASE_URL", "").strip()
+    key = st.secrets.get("SUPABASE_KEY", "").strip()
+    
     if not url or not key:
-        st.error("Missing Supabase credentials in secrets.")
+        st.error("Missing Supabase credentials in Streamlit Secrets.")
+        st.info("Please add SUPABASE_URL and SUPABASE_KEY to your app settings.")
         st.stop()
-    return create_client(url, key)
+        
+    try:
+        # Create client with cleaned strings
+        client = create_client(url, key)
+        return client
+    except Exception as e:
+        st.error(f"Failed to initialize Supabase client: {e}")
+        st.stop()
 
 supabase = get_supabase_client()
 
