@@ -1,7 +1,14 @@
 import streamlit as st
 import pandas as pd
-from supabase import get_supabase_client_with_retry
+from supabase import create_client, Client  # <--- FIXED THIS LINE
 from decimal import Decimal
+from datetime import datetime
+import yfinance as yf
+import plotly.express as px
+import plotly.graph_objects as go
+import re
+import os
+import time
 
 # Initialize Supabase client
 @st.cache_resource
