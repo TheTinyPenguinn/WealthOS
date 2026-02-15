@@ -5,8 +5,13 @@ from decimal import Decimal
 
 # Initialize Supabase client
 @st.cache_resource
-def get_supabase_client() -> Client:
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+def get_supabase_client():
+    url = st.secrets.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY")
+    if not url or not key:
+        st.error("Missing Supabase credentials in secrets.")
+        st.stop()
+    return create_client(url, key)
 
 supabase = get_supabase_client()
 
