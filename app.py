@@ -157,7 +157,7 @@ if st.session_state.user is None:
             if st.form_submit_button("Sign Up", use_container_width=True):
                 try:
                     res = db.supabase.auth.sign_up({"email": new_email, "password": new_password})
-                    st.success("Check your email for confirmation!")
+                    st.success("Signup successful! You can now Log In.")
                 except Exception as e:
                     st.error(f"Signup failed: {e}")
     st.stop()
