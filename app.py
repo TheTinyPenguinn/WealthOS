@@ -177,7 +177,14 @@ if not st.session_state.data_loaded:
             
             settings = data["settings"]
             st.session_state.salary = settings.get("salary", 0.0)
-            st.session_state.api_key = settings.get("api_key", "")
+            
+            # --- API KEY FALLBACK LOGIC ---
+            # 1. Check Supabase (User's personal key)
+            # 2. Check st.secrets (Developer's shared key)
+            db_api_key = settings.get("api_key", "")
+            secrets_api_key = st.secrets.get("GEMINI_KEY", "")
+            st.session_state.api_key = db_api_key if db_api_key else secrets_api_key
+            
             st.session_state.selected_model = settings.get("selected_model", "gemini-1.5-flash")
             
             # Global configuration for Gemini
@@ -190,12 +197,6 @@ if not st.session_state.data_loaded:
             
             st.session_state.data_loaded = True
             st.rerun()
-
-# Sidebar Logout
-if st.sidebar.button("🚪 Logout"):
-    handle_logout()
-
-st.sidebar.divider()
 
 # ============================================================================
 # DATA ENGINE - SUPABASE WRAPPERS
@@ -231,6 +232,26 @@ def save_investments(df):
     except Exception as e:
         st.error(f"Error saving investments: {e}")
         return False
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+
+def safe_float(val, default=0.0):
+    try:
+        if val is None or pd.isna(val):
+            return default
+        # Handle string inputs with multiple decimals or invalid chars
+        if isinstance(val, str):
+            # Remove common currency symbols and commas
+            clean_val = val.replace('₹', '').replace('$', '').replace(',', '').strip()
+            # Check for multiple decimal points
+            if clean_val.count('.') > 1:
+                return default
+            return float(clean_val)
+        return float(val)
+    except (ValueError, TypeError):
+        return default
 
 # ============================================================================
 # INVESTMENT ENGINE - PRICE FETCHING WITH CACHING
@@ -904,15 +925,15 @@ def calculate_true_burn(expenses_df, fixed_df, obligations_df, salary):
 def calculate_metrics(expenses_df, investments_df, accounts_df):
     """Calculate dashboard metrics with Cash Flow First logic."""
     # Get inputs
-    salary = st.session_state.get('salary', 0.0)
+    salary = safe_float(st.session_state.get('salary', 0.0))
     fx_rate = get_usd_rate()
     
     # 1. FIXED COSTS (Monthly Floor)
     monthly_floor = 0.0
     if 'fixed_costs' in st.session_state:
         for _, row in st.session_state.fixed_costs.iterrows():
-            amt = float(row['Amount'])
-            freq = row['Frequency']
+            amt = safe_float(row.get('Amount', 0.0))
+            freq = row.get('Frequency', 'Monthly')
             if freq == 'Monthly': monthly_floor += amt
             elif freq == 'Quarterly': monthly_floor += amt / 3
             elif freq == 'Half-Yearly': monthly_floor += amt / 6
@@ -926,13 +947,13 @@ def calculate_metrics(expenses_df, investments_df, accounts_df):
     
     if 'obligations' in st.session_state:
         for _, row in st.session_state.obligations.iterrows():
-            if row['Type'] == 'Loan':
-                total_emi += float(row['Amount'])
-                principal = float(row['Current Balance'])
-                if row['Currency'] == 'USD': principal *= fx_rate
+            if row.get('Type') == 'Loan':
+                total_emi += safe_float(row.get('Amount', 0.0))
+                principal = safe_float(row.get('Current Balance', 0.0))
+                if row.get('Currency') == 'USD': principal *= fx_rate
                 
                 total_debt_balance += principal
-                rate = float(row['Interest Rate (%)'])
+                rate = safe_float(row.get('Interest Rate (%)', 0.0))
                 monthly_interest_burn += (principal * (rate / 100)) / 12
                 weighted_rate_sum += principal * rate
 
@@ -965,10 +986,10 @@ def calculate_metrics(expenses_df, investments_df, accounts_df):
     rsu_real_value = 0.0
     
     for _, row in accounts_df.iterrows():
-        val = float(row['Balance'])
+        val = safe_float(row.get('Balance', 0.0))
         if row.get('Currency') == 'USD': val *= fx_rate
         
-        t = row['Type']
+        t = row.get('Type', 'Bank/Cash')
         account_name = str(row.get('Account Name', '')).lower()
         
         # Strict Loan Segregation: Skip any loan/debt entries
@@ -1011,7 +1032,31 @@ if 'parsed_csv' not in st.session_state:
 # --- SIDEBAR - RICH CLASSIC DESIGN ---
 st.sidebar.title("💰 WealthOS v5")
 
-# 1. Metric Summary
+# 1. 📣 Feedback Hub (Prioritized at Top)
+with st.sidebar.expander("📣 Report Bug / Suggest Idea", expanded=False):
+    with st.form(key="feedback_form", clear_on_submit=True):
+        f_type = st.selectbox("Type", ["🪲 Bug", "💡 Idea", "⚖️ Math Error", "🎨 UI"])
+        f_priority = st.radio("Priority", ["Low", "Med", "High"], horizontal=True)
+        f_details = st.text_area("Details", help="Please describe the issue or suggestion.")
+        if st.form_submit_button("Submit Feedback", use_container_width=True):
+            if f_details:
+                net_worth, liquid_cash, total_debt, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs = calculate_metrics(
+                    st.session_state.expenses,
+                    st.session_state.investments,
+                    st.session_state.accounts
+                )
+                metadata = {
+                    "model": st.session_state.get('selected_model'),
+                    "net_worth": net_worth,
+                    "liquid_cash": liquid_cash,
+                    "total_debt": total_debt
+                }
+                if db.insert_feedback(st.session_state.user.id, f_type, f_details, metadata):
+                    st.success("Thanks for the feedback!")
+                else:
+                    st.error("Failed to send feedback.")
+
+# 2. Metric Summary
 total_portfolio = 0.0
 if not st.session_state.investments.empty:
     # Assuming calculate_metrics or similar is available or we use simpler logic for sidebar
@@ -1045,84 +1090,19 @@ with st.sidebar.expander("⚙️ Configuration", expanded=True):
         db.sync_settings(st.session_state.user.id, salary_input, st.session_state.api_key, st.session_state.selected_model)
         st.toast("✅ Salary updated", icon="💰")
 
-    api_key_input = st.text_input("Gemini API Key", type="password", value=st.session_state.get('api_key', ''), help="Get key from Google AI Studio")
+    api_key_placeholder = "Using shared key" if st.secrets.get("GEMINI_KEY") and not st.session_state.get('api_key') else "Enter your personal key"
+    api_key_input = st.text_input("Gemini API Key", type="password", value=st.session_state.get('api_key', ''), placeholder=api_key_placeholder, help="Leave blank to use the shared key, or enter your own.")
     if api_key_input != st.session_state.get('api_key', ''):
         st.session_state.api_key = api_key_input
         db.sync_settings(st.session_state.user.id, st.session_state.salary, api_key_input, st.session_state.selected_model)
         st.toast("✅ API Key updated", icon="🔑")
 
 # 3. 🏠 Core Data
-with st.sidebar.expander("� Fixed Living Costs", expanded=False):
-    fixed_costs = st.data_editor(
-        st.session_state.fixed_costs,
-        column_config={
-            "Category": st.column_config.TextColumn("Category"),
-            "Amount": st.column_config.NumberColumn("Amount (₹)", format="₹%.2f"),
-            "Frequency": st.column_config.SelectboxColumn("Frequency", options=['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'])
-        },
-        hide_index=True,
-        use_container_width=True,
-        num_rows="dynamic",
-        key="sidebar_fixed_costs_editor",
-        on_change=save_all_data_callback
-    )
-    st.session_state.fixed_costs = fixed_costs
-
-with st.sidebar.expander("💳 Financial Obligations", expanded=False):
-    obligations = st.data_editor(
-        st.session_state.obligations,
-        column_config={
-            "Name": st.column_config.TextColumn("Name"),
-            "Amount": st.column_config.NumberColumn("Monthly EMI (₹)", format="₹%.2f"),
-            "Type": st.column_config.SelectboxColumn("Type", options=['Loan', 'SIP']),
-            "Current Balance": st.column_config.NumberColumn("Current Balance", format="₹%.2f"),
-            "Currency": st.column_config.SelectboxColumn("Currency", options=['INR', 'USD']),
-            "Interest Rate (%)": st.column_config.NumberColumn("Interest Rate (%)", format="%.1f%%")
-        },
-        hide_index=True,
-        use_container_width=True,
-        num_rows="dynamic",
-        key="sidebar_obligations_editor",
-        on_change=save_all_data_callback
-    )
-    st.session_state.obligations = obligations
-
-# 4. 📣 Feedback Hub
-with st.sidebar.expander("📣 Report Bug / Suggest Idea", expanded=False):
-    with st.form(key="feedback_form", clear_on_submit=True):
-        f_type = st.selectbox("Type", ["🪲 Bug", "💡 Idea", "⚖️ Math Error", "🎨 UI"])
-        f_priority = st.radio("Priority", ["Low", "Med", "High"], horizontal=True)
-        f_details = st.text_area("Details")
-        if st.form_submit_button("Submit Feedback", use_container_width=True):
-            if f_details:
-                # Calculate metrics for metadata
-                net_worth, liquid_cash, total_debt, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs = calculate_metrics(
-                    st.session_state.expenses,
-                    st.session_state.investments,
-                    st.session_state.accounts
-                )
-                metadata = {
-                    "model": st.session_state.get('selected_model'),
-                    "net_worth": net_worth,
-                    "liquid_cash": liquid_cash,
-                    "total_debt": total_debt
-                }
-                if db.insert_feedback(st.session_state.user.id, f_type, f_details, metadata):
-                    st.success("Thanks for the feedback!")
-                else:
-                    st.error("Failed to send feedback.")
-
-# 5. Logout
-st.sidebar.markdown('<div style="margin-top: 30vh;"></div>', unsafe_allow_html=True)
-if st.sidebar.button("🚪 Logout", use_container_width=True):
-    handle_logout()
-
-st.sidebar.divider()
-
 # --- ACCOUNTS & CASH ---
-with st.sidebar.expander("🏦 Accounts & Cash", expanded=True):
+with st.sidebar.expander("🏦 Accounts & Cash", expanded=False):
     st.caption("Bank accounts, credit cards, and manual investments (RSU, PPF, Gold).")
     st.info("📌 **Important**: Loans should now be entered in the 'Financial Obligations' section below to avoid double counting.")
+    
     # Schema Upgrade: Add Currency column if missing
     if 'Currency' not in st.session_state.accounts.columns:
         st.session_state.accounts['Currency'] = 'INR'
@@ -1149,150 +1129,130 @@ with st.sidebar.expander("🏦 Accounts & Cash", expanded=True):
         hide_index=True,
         use_container_width=True,
         num_rows="dynamic",
-        key="accounts_editor",
+        key="accounts_editor_v5",
         on_change=save_all_data_callback
     )
     st.session_state.accounts = edited_accounts
+
+# 3. 🏠 Core Data
+with st.sidebar.expander("🏠 Fixed Living Costs", expanded=False):
+    fixed_costs = st.data_editor(
+        st.session_state.fixed_costs,
+        column_config={
+            "Category": st.column_config.TextColumn("Category", required=True, default="General"),
+            "Amount": st.column_config.NumberColumn("Amount (₹)", format="₹%.2f", min_value=0.0, default=0.0),
+            "Frequency": st.column_config.SelectboxColumn("Frequency", options=['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'], required=True, default="Monthly")
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="dynamic",
+        key="sidebar_fixed_costs_editor_v5",
+        on_change=save_all_data_callback
+    )
+    st.session_state.fixed_costs = fixed_costs
+
+with st.sidebar.expander("💳 Financial Obligations", expanded=False):
+    st.info("💡 **Includes**: Loans, EMIs, SIPs, Term/Health Insurance premiums, or any other recurring monthly commitment.")
+    obligations = st.data_editor(
+        st.session_state.obligations,
+        column_config={
+            "Name": st.column_config.TextColumn("Description"),
+            "Amount": st.column_config.NumberColumn("Monthly Value (₹)", format="₹%.2f", min_value=0.0),
+            "Type": st.column_config.SelectboxColumn("Type", options=['Loan', 'SIP', 'Insurance', 'Other']),
+            "Current Balance": st.column_config.NumberColumn("Remaining Principal / Goal", format="₹%.2f", min_value=0.0, help="For loans: Remaining principal. For SIPs: Target or current value."),
+            "Currency": st.column_config.SelectboxColumn("Currency", options=['INR', 'USD']),
+            "Interest Rate (%)": st.column_config.NumberColumn("Interest/Yield (%)", format="%.1f%%", min_value=0.0)
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="dynamic",
+        key="sidebar_obligations_editor_v5",
+        on_change=save_all_data_callback
+    )
+    st.session_state.obligations = obligations
+
+# 5. ➕ Quick Entry
+with st.sidebar.expander("➕ Quick Entry", expanded=False):
+    # Tabbed approach for cleaner Quick Entry
+    entry_tab1, entry_tab2, entry_tab3 = st.tabs(["💰 Expense", "🏦 Account", "📈 Asset"])
     
-    # Calculate distinct accounting buckets with currency conversion (Fixed: No Loan counting)
-    fx_rate = get_usd_rate()
-    bank_cash = 0.0
-    credit_card = 0.0
-    investments_sidebar = 0.0
-    
-    for _, row in edited_accounts.iterrows():
-        val = row['Balance']
-        if row['Currency'] == 'USD':
-            val = val * fx_rate
+    with entry_tab1:
+        st.markdown("#### Quick Add Transaction")
+        # Removed st.form to prevent double-rerun clearing issue
+        s_date = st.date_input("Date", value=datetime.now().date(), key="sb_txn_date")
+        s_desc = st.text_input("Description", placeholder="Coffee, Rent, etc.", key="sb_txn_desc")
+        s_amount = st.number_input("Amount", step=100.0, format="%.2f", key="sb_txn_amt")
+        s_cat = st.selectbox("Category", options=CATEGORIES, key="sb_txn_cat")
         
-        if row['Type'] == 'Bank/Cash':
-            bank_cash += val
-        elif row['Type'] == 'Credit Card':
-            credit_card += val
-        elif row['Type'] == 'Investment (Non-Zerodha)':
-            investments_sidebar += val
-        # NOTE: Loans are now handled only in Financial Obligations section
-    
-    # Liquid Cash (Runway Fuel) = Bank/Cash - Credit Card
-    liquid_cash = bank_cash - credit_card
-    
-    # Total Debt from Accounts = Credit Card only (Loans handled in Obligations)
-    total_debt = credit_card
-    
-    st.session_state.bank_balance = liquid_cash
-    
-    # Display summary
-    st.caption(f"**Net Liquidity:** ₹{liquid_cash:,.2f}")
-    st.caption(f"**Total Debt:** ₹{total_debt:,.2f}")
-    st.caption(f"**Investments:** ₹{investments_sidebar:,.2f}")
+        if st.button("Add Transaction", use_container_width=True, key="sb_txn_btn"):
+            if s_desc:
+                try:
+                    new_txn = pd.DataFrame([{
+                        'Date': pd.Timestamp(s_date),
+                        'Description': s_desc,
+                        'Amount': s_amount,
+                        'Category': s_cat
+                    }])
+                    st.session_state.expenses = pd.concat([st.session_state.expenses, new_txn], ignore_index=True)
+                    db.add_expense(st.session_state.user.id, s_date, s_desc, s_amount, s_cat)
+                    st.success("✅ Added")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
-st.sidebar.divider()
-
-# --- MONTHLY COMMITMENTS ---
-with st.sidebar.expander("🔒 Monthly Commitments", expanded=True):
-    # Fixed Living Costs
-    with st.expander("🏠 Fixed Living Costs", expanded=True):
-        fixed_costs = st.data_editor(
-            st.session_state.fixed_costs,
-            column_config={
-                "Category": st.column_config.TextColumn("Category"),
-                "Amount": st.column_config.NumberColumn("Amount (₹)", format="₹%.2f"),
-                "Frequency": st.column_config.SelectboxColumn("Frequency", options=['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'])
-            },
-            hide_index=True,
-            use_container_width=True,
-            num_rows="dynamic",
-            key="fixed_costs_editor",
-            on_change=save_all_data_callback
-        )
-        st.session_state.fixed_costs = fixed_costs
-    
-    # Financial Obligations
-    with st.expander("💳 Financial Obligations (Debt/SIP)", expanded=True):
-        # Schema Migration: Add new columns if missing
-        required_cols = ['Current Balance', 'Currency', 'Interest Rate (%)']
-        for col in required_cols:
-            if col not in st.session_state.obligations.columns:
-                st.session_state.obligations[col] = 0.0 if col in ['Current Balance', 'Interest Rate (%)'] else 'INR'
+    with entry_tab2:
+        st.markdown("#### Add Bank Account/Cash")
+        acc_name = st.text_input("Account Name", placeholder="e.g., HDFC Savings", key="sb_acc_name")
+        acc_bal = st.number_input("Initial Balance", min_value=0.0, step=1000.0, key="sb_acc_bal")
+        acc_type = st.selectbox("Account Type", options=['Bank/Cash', 'Investment (Non-Zerodha)', 'Credit Card'], key="sb_acc_type")
+        acc_curr = st.selectbox("Currency", options=['INR', 'USD'], key="sb_acc_curr")
         
-        # Fill NaN values with defaults
-        st.session_state.obligations['Current Balance'].fillna(0.0, inplace=True)
-        st.session_state.obligations['Currency'].fillna('INR', inplace=True)
-        st.session_state.obligations['Interest Rate (%)'].fillna(10.0, inplace=True)
+        if st.button("Add Account", use_container_width=True, key="sb_acc_btn"):
+            if acc_name:
+                new_acc = pd.DataFrame([{
+                    'Account Name': acc_name,
+                    'Balance': acc_bal,
+                    'Type': acc_type,
+                    'Currency': acc_curr
+                }])
+                st.session_state.accounts = pd.concat([st.session_state.accounts, new_acc], ignore_index=True)
+                db.sync_accounts(st.session_state.user.id, st.session_state.accounts)
+                st.success("✅ Account added")
+                st.rerun()
+
+    with entry_tab3:
+        st.markdown("#### Add Asset (Stock/RSU/Gold)")
+        asset_type = st.selectbox("Type", options=ASSET_TYPES, key="sb_asset_type")
+        asset_ticker = st.text_input("Ticker", placeholder="e.g., RELIANCE.NS", key="sb_asset_ticker")
+        asset_qty = st.number_input("Quantity", min_value=0.0, step=1.0, format="%.2f", key="sb_asset_qty")
+        asset_avg_price = st.number_input("Avg Buy Price (₹)", min_value=0.0, step=10.0, format="%.2f", key="sb_asset_avg")
         
-        obligations = st.data_editor(
-            st.session_state.obligations,
-            column_config={
-                "Name": st.column_config.TextColumn("Name"),
-                "Amount": st.column_config.NumberColumn("Monthly EMI (₹)", format="₹%.2f"),
-                "Type": st.column_config.SelectboxColumn("Type", options=['Loan', 'SIP']),
-                "Current Balance": st.column_config.NumberColumn("Current Balance", format="₹%.2f", help="Remaining amount you owe"),
-                "Currency": st.column_config.SelectboxColumn("Currency", options=['INR', 'USD']),
-                "Interest Rate (%)": st.column_config.NumberColumn("Interest Rate (%)", format="%.1f%%")
-            },
-            hide_index=True,
-            use_container_width=True,
-            num_rows="dynamic",
-            key="obligations_editor",
-            on_change=save_all_data_callback
-        )
-        st.session_state.obligations = obligations
-        
-        # Real-Time Debt Trap Detection
-        for _, row in obligations.iterrows():
-            if row['Type'] == 'Loan':
-                principal = row['Current Balance']
-                if row['Currency'] == 'USD':
-                    principal *= 85.0  # Convert to INR
-                
-                monthly_interest = (principal * (row['Interest Rate (%)'] / 100)) / 12
-                emi = row['Amount']
-                
-                if emi < monthly_interest:
-                    st.error(f"⚠️ Debt Trap Alert: {row['Name']} - EMI (₹{emi:,.0f}) < Monthly Interest (₹{monthly_interest:,.0f})")
+        if st.button("Add Asset", use_container_width=True, key="sb_asset_btn"):
+            if asset_ticker and asset_qty > 0:
+                new_asset = pd.DataFrame([{
+                    'Ticker': asset_ticker.upper(),
+                    'Type': asset_type,
+                    'Quantity': asset_qty,
+                    'Avg_Buy_Price': asset_avg_price
+                }])
+                st.session_state.investments = pd.concat(
+                    [st.session_state.investments, new_asset],
+                    ignore_index=True
+                )
+                db.sync_investments(st.session_state.user.id, st.session_state.investments)
+                st.success("✅ Asset added")
+                fetch_live_price.clear()
+                st.rerun()
 
-st.sidebar.divider()
-
-# --- ACTIONS ---
-st.sidebar.markdown("### 📥 Data Import")
-
-st.sidebar.divider()
-
-# Add Asset Form
-st.sidebar.markdown("#### 📈 Add Asset")
-with st.sidebar.form("add_asset_form", clear_on_submit=True):
-    asset_type = st.selectbox("Type", options=ASSET_TYPES)
-    asset_ticker = st.text_input("Ticker", placeholder="e.g., RELIANCE.NS")
-    asset_qty = st.number_input("Quantity", min_value=0.0, step=1.0, format="%.2f")
-    asset_avg_price = st.number_input("Avg Buy Price (₹)", min_value=0.0, step=10.0, format="%.2f")
-    
-    if st.form_submit_button("Add Asset", use_container_width=True):
-        if asset_ticker and asset_qty > 0:
-            new_asset = pd.DataFrame([{
-                'Ticker': asset_ticker.upper(),
-                'Type': asset_type,
-                'Quantity': asset_qty,
-                'Avg_Buy_Price': asset_avg_price
-            }])
-            st.session_state.investments = pd.concat(
-                [st.session_state.investments, new_asset],
-                ignore_index=True
-            )
-            # Sync to Supabase
-            db.sync_investments(st.session_state.user.id, st.session_state.investments)
-            st.success("✅ Asset added to cloud")
-            fetch_live_price.clear()  # Clear cache to fetch new price
-            st.rerun()
-
-st.sidebar.divider()
+# 5. Logout
+st.sidebar.markdown('<div style="margin-top: 20vh;"></div>', unsafe_allow_html=True)
+if st.sidebar.button("🚪 Logout", use_container_width=True, key="sidebar_logout_absolute_final"):
+    handle_logout()
 
 st.sidebar.caption("☁️ WealthOS Cloud Connection Active")
 
-# ============================================================================
-# MAIN PAGE - TABBED LAYOUT
-# ============================================================================
-
-st.title("WealthOS v4")
+# --- MAIN PAGE - TABBED LAYOUT ---
+st.title("WealthOS v5")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 Investments", "🤖 AI Brain"])
 
@@ -1302,7 +1262,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 I
 
 with tab1:
     # Calculate Cash Flow First metrics for high-income users
-    salary = st.session_state.get('salary', 0.0)
+    salary = safe_float(st.session_state.get('salary', 0.0))
     net_worth, liquid_cash, total_debt, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs = calculate_metrics(
         st.session_state.expenses,
         st.session_state.investments,

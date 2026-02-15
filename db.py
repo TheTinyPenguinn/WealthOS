@@ -124,17 +124,22 @@ def sync_accounts(user_id, df):
         st.error(f"Account Sync Error: {e}")
 
 def sync_fixed(user_id, df):
-    """Sync fixed costs to Supabase. Handles empty dataframes."""
+    """Sync fixed costs to Supabase. Handles empty dataframes and enforces non-null constraints."""
     try:
         supabase.table("fixed_costs").delete().eq("user_id", user_id).execute()
         if df is not None and not df.empty:
             payload = []
             for _, row in df.iterrows():
+                # Enforce non-null frequency and category
+                category = row.get("Category") or "General"
+                frequency = row.get("Frequency") or "Monthly"
+                amount = float(row.get("Amount") or 0.0)
+                
                 payload.append({
                     "user_id": user_id,
-                    "category": row.get("Category", "Unknown"),
-                    "amount": float(row.get("Amount", 0.0)),
-                    "frequency": row.get("Frequency", "Monthly")
+                    "category": str(category),
+                    "amount": amount,
+                    "frequency": str(frequency)
                 })
             if payload:
                 supabase.table("fixed_costs").insert(payload).execute()
