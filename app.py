@@ -1279,7 +1279,7 @@ with tab1:
         3.  **🏠 Fixed Living Costs**: List your recurring monthly expenses.
         4.  **💸 Transactions Tab**: Import your bank statement to see your spending patterns.
         """)
-        st.stop()
+        st.divider()  # Just add a visual break, DO NOT use st.stop()
     
     # Legacy compatibility for existing code
     monthly_spend = true_burn
@@ -1436,6 +1436,10 @@ with tab1:
 # ============================================================================
 
 with tab2:
+    # --- EMPTY STATE ONBOARDING ---
+    if st.session_state.expenses.empty:
+        st.info("👋 Welcome! Add your first transaction in Quick Entry menu to see your spending log.")
+    
     # --- CSV UPLOADER (MOBILE UX) ---
     with st.expander("📤 Import Bank Statement (CSV)", expanded=False):
         uploaded_file = st.file_uploader(
@@ -1648,6 +1652,10 @@ with tab2:
 # ============================================================================
 
 with tab3:
+    # --- EMPTY STATE ONBOARDING ---
+    if st.session_state.investments.empty:
+        st.info("📈 Your portfolio is empty. Add an asset to start tracking your wealth.")
+    
     # --- ZERODHA IMPORT UI ---
     st.markdown("### 📥 Import Portfolio")
     with st.expander("Import from Zerodha Console"):
