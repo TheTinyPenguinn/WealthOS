@@ -185,6 +185,37 @@ def load_all_data(user_id):
         profile_res = supabase.table("user_profile").select("*").eq("user_id", user_id).limit(1).execute()
         user_profile = profile_res.data[0] if profile_res.data else {}
 
+        # Load Capital Gains
+        cg_res = supabase.table("capital_gains").select("*").eq("user_id", user_id).execute()
+        capital_gains = ensure_dataframe_schema(
+            cg_res.data,
+            [
+                "asset_name",
+                "asset_type",
+                "buy_date",
+                "buy_price",
+                "sell_date",
+                "sell_price",
+                "units",
+                "notes",
+            ],
+        )
+        capital_gains = capital_gains.rename(
+            columns={
+                "asset_name": "Asset Name",
+                "asset_type": "Asset Type",
+                "buy_date": "Buy Date",
+                "buy_price": "Buy Price",
+                "sell_date": "Sell Date",
+                "sell_price": "Sell Price",
+                "units": "Units",
+                "notes": "Notes",
+            }
+        )
+        if not capital_gains.empty:
+            capital_gains["Buy Date"] = pd.to_datetime(capital_gains["Buy Date"], errors="coerce")
+            capital_gains["Sell Date"] = pd.to_datetime(capital_gains["Sell Date"], errors="coerce")
+
         return {
             "settings": settings,
             "accounts": accounts,
@@ -195,6 +226,7 @@ def load_all_data(user_id):
             "illiquid_assets": illiquid_assets,
             "credit_cards": credit_cards,
             "user_profile": user_profile,
+            "capital_gains": capital_gains,
         }
     except Exception as e:
         st.error(f"Error loading database: {e}")
@@ -403,6 +435,33 @@ def sync_tax_investments(user_id, financial_year, df):
                 supabase.table("tax_investments").insert(payload).execute()
     except Exception as e:
         st.error(f"Tax Investments Sync Error: {e}")
+
+def sync_capital_gains(user_id, df):
+    """Replace all capital gains positions for user."""
+    try:
+        supabase.table("capital_gains").delete().eq("user_id", user_id).execute()
+        if df is not None and not df.empty:
+            payload = []
+            for _, row in df.iterrows():
+                buy_date = pd.to_datetime(row.get("Buy Date"), errors="coerce")
+                sell_date = pd.to_datetime(row.get("Sell Date"), errors="coerce")
+                payload.append(
+                    {
+                        "user_id": user_id,
+                        "asset_name": str(row.get("Asset Name", "Unknown Asset")),
+                        "asset_type": str(row.get("Asset Type", "other")),
+                        "buy_date": buy_date.date().isoformat() if pd.notna(buy_date) else datetime.now().date().isoformat(),
+                        "buy_price": float(row.get("Buy Price", 0.0)),
+                        "sell_date": sell_date.date().isoformat() if pd.notna(sell_date) else None,
+                        "sell_price": float(row.get("Sell Price", 0.0)) if pd.notna(row.get("Sell Price")) else None,
+                        "units": float(row.get("Units", 0.0)),
+                        "notes": str(row.get("Notes", "")),
+                    }
+                )
+            if payload:
+                supabase.table("capital_gains").insert(payload).execute()
+    except Exception as e:
+        st.error(f"Capital Gains Sync Error: {e}")
 
 def add_expense(user_id, date, desc, amount, category):
     payload = {
