@@ -3,6 +3,14 @@ import json
 import os
 from supabase import create_client
 
+def resolve_data_path(*parts):
+    """Resolve paths from project root with legacy fallback."""
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    primary = os.path.join(project_root, *parts)
+    if os.path.exists(primary):
+        return primary
+    return os.path.join(project_root, "data", parts[-1])
+
 def migrate():
     print("🚀 WealthOS Migration Tool")
     url = input("Supabase URL: ").strip()
@@ -19,8 +27,9 @@ def migrate():
         print(f"✅ Authenticated: {user_id}")
 
         # 2. Settings Migration
-        if os.path.exists('data/settings.json'):
-            with open('data/settings.json', 'r') as f:
+        settings_path = resolve_data_path("data", "settings.json")
+        if os.path.exists(settings_path):
+            with open(settings_path, 'r') as f:
                 s = json.load(f)
                 payload = {
                     "user_id": user_id,
@@ -32,8 +41,9 @@ def migrate():
                 print("✅ Settings migrated")
 
         # 3. Accounts Migration
-        if os.path.exists('data/accounts.csv'):
-            df = pd.read_csv('data/accounts.csv')
+        accounts_path = resolve_data_path("data", "accounts.csv")
+        if os.path.exists(accounts_path):
+            df = pd.read_csv(accounts_path)
             payload = []
             for _, row in df.iterrows():
                 payload.append({
@@ -48,8 +58,9 @@ def migrate():
                 print(f"✅ {len(payload)} Accounts migrated")
 
         # 4. Fixed Costs Migration
-        if os.path.exists('data/fixed_costs.csv'):
-            df = pd.read_csv('data/fixed_costs.csv')
+        fixed_costs_path = resolve_data_path("data", "fixed_costs.csv")
+        if os.path.exists(fixed_costs_path):
+            df = pd.read_csv(fixed_costs_path)
             payload = []
             for _, row in df.iterrows():
                 payload.append({
@@ -63,8 +74,9 @@ def migrate():
                 print(f"✅ {len(payload)} Fixed Costs migrated")
 
         # 5. Obligations Migration
-        if os.path.exists('data/obligations.csv'):
-            df = pd.read_csv('data/obligations.csv')
+        obligations_path = resolve_data_path("data", "obligations.csv")
+        if os.path.exists(obligations_path):
+            df = pd.read_csv(obligations_path)
             payload = []
             for _, row in df.iterrows():
                 payload.append({
@@ -81,8 +93,9 @@ def migrate():
                 print(f"✅ {len(payload)} Obligations migrated")
 
         # 6. Investments Migration
-        if os.path.exists('investments.csv'):
-            df = pd.read_csv('investments.csv')
+        investments_path = resolve_data_path("data_samples", "investments.csv")
+        if os.path.exists(investments_path):
+            df = pd.read_csv(investments_path)
             payload = []
             for _, row in df.iterrows():
                 payload.append({
@@ -97,8 +110,9 @@ def migrate():
                 print(f"✅ {len(payload)} Investments migrated")
 
         # 7. Expenses Migration
-        if os.path.exists('expenses.csv'):
-            df = pd.read_csv('expenses.csv')
+        expenses_path = resolve_data_path("data_samples", "expenses.csv")
+        if os.path.exists(expenses_path):
+            df = pd.read_csv(expenses_path)
             payload = []
             for _, row in df.iterrows():
                 payload.append({

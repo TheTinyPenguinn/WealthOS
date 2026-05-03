@@ -1,24 +1,16 @@
-# --- DATA SECURITY (CRITICAL) ---
-expenses.csv
-investments.csv
-data/
-backup/
-backups/
-*_backup_*.csv
-secrets.toml
-
-# --- PYTHON & ENV ---
-__pycache__/
-*.py[cod]
 .venv/
 venv/
+backup/
+backups/
+build/
+dist/
+*.spec
+*.csv
 .env
+__pycache__/
+*.pyc
 
-# --- OS FILES ---
+# Existing useful ignores
+secrets.toml
 .DS_Store
 .AppleDouble
-
-# --- BUILD ARTIFACTS (PyInstaller) ---
-dist/
-build/
-*.spec

@@ -15,7 +15,7 @@ def resolve_path(path):
 
 if __name__ == "__main__":
     # Point to your actual app code
-    app_path = resolve_path("app.py")
+    app_path = resolve_path("app/app.py")
     
     # Fake the command line arguments to start Streamlit
     sys.argv = [
