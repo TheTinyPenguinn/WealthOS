@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "[1/7] Syntax compile checks"
+echo "[1/8] Syntax compile checks"
 PYTHONPYCACHEPREFIX="$ROOT_DIR/.pycache_tmp" python3 - <<'PY'
 import py_compile
 
@@ -20,6 +20,7 @@ files = [
     "app/tax/deductions.py",
     "app/tax/regime_compare.py",
     "app/tax/ca_export.py",
+    "app/tax/capital_gains.py",
     "scripts/run.py",
 ]
 for f in files:
@@ -27,7 +28,7 @@ for f in files:
 print("PASS: syntax compilation")
 PY
 
-echo "[2/7] LLM client modular tests"
+echo "[2/8] LLM client modular tests"
 python3 - <<'PY'
 import os
 import importlib.util
@@ -48,7 +49,7 @@ assert mod._resolve_api_key("gemini", "manual-key") == "manual-key"
 print("PASS: llm_client behavior")
 PY
 
-echo "[3/7] AMFI + FX provider cache tests"
+echo "[3/8] AMFI + FX provider cache tests"
 python3 - <<'PY'
 import io
 import json
@@ -172,7 +173,7 @@ finally:
 print("PASS: amfi/fx caching and conversion")
 PY
 
-echo "[4/7] Phase wiring contract checks"
+echo "[4/8] Phase wiring contract checks"
 python3 - <<'PY'
 from pathlib import Path
 
@@ -191,6 +192,8 @@ assert "with tab5:" in app_text
 assert "get_deductions_summary" in app_text
 assert "compare_regimes" in app_text
 assert "generate_ca_export_pdf" in app_text
+assert "get_harvesting_alerts" in app_text
+assert "Capital Gains" in app_text
 
 # Ensure no direct model SDK usage in app.py.
 for forbidden in ("google.generativeai", "GenerativeModel("):
@@ -206,6 +209,7 @@ for required in (
     "user_profile",
     "load_tax_investments",
     "sync_tax_investments",
+    "sync_capital_gains",
 ):
     assert required in db_text, f"Missing db support: {required}"
 
@@ -224,7 +228,7 @@ for key in (
 print("PASS: phase contract wiring")
 PY
 
-echo "[5/7] OCR parser + privacy tests"
+echo "[5/8] OCR parser + privacy tests"
 python3 - <<'PY'
 import sys
 sys.path.insert(0, ".")
@@ -297,7 +301,7 @@ finally:
 print("PASS: OCR parser privacy + zero-retention flow")
 PY
 
-echo "[6/7] Tax module tests"
+echo "[6/8] Tax module tests"
 python3 - <<'PY'
 from app.tax.deductions import get_deductions_summary
 from app.tax.regime_compare import calc_tax, compare_regimes
@@ -356,7 +360,56 @@ assert isinstance(pdf, (bytes, bytearray)) and len(pdf) > 100
 print("PASS: tax modules")
 PY
 
-echo "[7/7] Quick streamlit route check (already-running app preferred)"
+echo "[7/8] Capital gains module tests"
+python3 - <<'PY'
+import app.tax.capital_gains as cg
+
+class Result:
+    def __init__(self, data):
+        self.data = data
+
+class Query:
+    def __init__(self, rows):
+        self.rows = rows
+        self.filters = {}
+    def select(self, *_):
+        return self
+    def eq(self, key, val):
+        self.filters[key] = val
+        return self
+    def execute(self):
+        data = [r for r in self.rows if all(r.get(k) == v for k, v in self.filters.items())]
+        return Result(data)
+
+class SupabaseStub:
+    def __init__(self):
+        self.rows = [
+            {"user_id": "u1", "asset_name": "12345", "asset_type": "equity_mf", "buy_date": "2024-01-01", "buy_price": 100, "sell_date": "2025-05-01", "sell_price": 140, "units": 100},
+            {"user_id": "u1", "asset_name": "ABC", "asset_type": "stock", "buy_date": "2025-01-01", "buy_price": 200, "sell_date": "2025-06-01", "sell_price": 220, "units": 50},
+            {"user_id": "u1", "asset_name": "12345", "asset_type": "equity_mf", "buy_date": "2025-03-01", "buy_price": 130, "sell_date": None, "sell_price": None, "units": 100},
+        ]
+    def table(self, name):
+        assert name == "capital_gains"
+        return Query(self.rows)
+
+sb = SupabaseStub()
+orig_get_nav = cg.get_nav
+cg.get_nav = lambda scheme_code, supabase: {"scheme_code": str(scheme_code), "nav": 120.0, "nav_date": "2026-01-01"}
+try:
+    assert cg.classify("stock", "2024-01-01", "2025-02-01") == "LTCG"
+    summary = cg.get_gains_summary("u1", "2025-2026", sb)
+    assert "total_tax" in summary and summary["total_tax"] >= 0
+    unrealised = cg.get_unrealised("u1", sb)
+    assert unrealised and unrealised[0]["asset_name"] == "12345"
+    alerts = cg.get_harvesting_alerts("u1", sb)
+    assert isinstance(alerts, list)
+finally:
+    cg.get_nav = orig_get_nav
+
+print("PASS: capital gains module")
+PY
+
+echo "[8/8] Quick streamlit route check (already-running app preferred)"
 if command -v curl >/dev/null 2>&1; then
   if curl -sS -o /tmp/wealthos_health.html -w "%{http_code}" "http://127.0.0.1:8514" | grep -q "200"; then
     echo "PASS: streamlit reachable at http://127.0.0.1:8514"

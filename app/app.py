@@ -20,6 +20,7 @@ from app.ingestion.ocr_parser import parse_file, confirm_and_save
 from app.tax.deductions import get_deductions_summary, get_80c_alert, current_financial_year
 from app.tax.regime_compare import compare_regimes
 from app.tax.ca_export import generate_ca_export_pdf
+from app.tax.capital_gains import get_gains_summary, get_unrealised, get_harvesting_alerts
 
 # Fix SSL certificate issues for yfinance on Mac
 os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -105,6 +106,7 @@ def save_all_data_callback():
         db.sync_investments(user_id, st.session_state.investments)
         db.sync_illiquid_assets(user_id, st.session_state.illiquid_assets)
         db.sync_credit_cards(user_id, st.session_state.credit_cards)
+        db.sync_capital_gains(user_id, st.session_state.capital_gains)
         st.toast("✅ Data synced to cloud", icon="☁️")
     except Exception as e:
         st.error(f"Error syncing data: {e}")
@@ -178,6 +180,7 @@ if not st.session_state.data_loaded:
             st.session_state.illiquid_assets = data["illiquid_assets"]
             st.session_state.credit_cards = data["credit_cards"]
             st.session_state.user_profile = data["user_profile"] or {}
+            st.session_state.capital_gains = data.get("capital_gains", pd.DataFrame())
             
             settings = data["settings"]
             st.session_state.salary = settings.get("salary", 0.0)
@@ -1102,6 +1105,10 @@ if 'tax_investments' not in st.session_state:
     st.session_state.tax_investments = pd.DataFrame(columns=["Instrument Type", "Amount Invested", "Notes"])
 if 'tax_fy_loaded' not in st.session_state:
     st.session_state.tax_fy_loaded = ""
+if 'capital_gains' not in st.session_state:
+    st.session_state.capital_gains = pd.DataFrame(
+        columns=["Asset Name", "Asset Type", "Buy Date", "Buy Price", "Sell Date", "Sell Price", "Units", "Notes"]
+    )
 
 if 'illiquid_assets' not in st.session_state:
     st.session_state.illiquid_assets = pd.DataFrame(
@@ -2189,7 +2196,11 @@ with tab5:
         },
     )
 
-    tax_tab1, tax_tab2, tax_tab3 = st.tabs(["80C Dashboard", "Regime Comparison", "CA Export"])
+    gains_summary = get_gains_summary(st.session_state.user.id, selected_fy, db.supabase)
+    unrealised_positions = get_unrealised(st.session_state.user.id, db.supabase)
+    harvesting_alerts = get_harvesting_alerts(st.session_state.user.id, db.supabase)
+
+    tax_tab1, tax_tab2, tax_tab3, tax_tab4 = st.tabs(["80C Dashboard", "Regime Comparison", "CA Export", "Capital Gains"])
 
     with tax_tab1:
         alert = get_80c_alert(st.session_state.user.id, db.supabase)
@@ -2273,6 +2284,7 @@ with tab5:
                     deductions_df=st.session_state.tax_investments,
                     summary=summary,
                     regime_result=regime_result,
+                    gains_summary=gains_summary,
                 )
                 st.download_button(
                     "Download Tax Summary PDF",
@@ -2283,6 +2295,88 @@ with tab5:
                 )
             except Exception as e:
                 st.error(f"Failed to generate PDF export: {e}")
+
+    with tax_tab4:
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            st.metric("Total LTCG", f"₹{gains_summary['total_ltcg']:,.0f}")
+        with g2:
+            st.metric("Total STCG", f"₹{gains_summary['total_stcg']:,.0f}")
+        with g3:
+            st.metric("Tax Owed", f"₹{gains_summary['total_tax']:,.0f}")
+
+        for alert in harvesting_alerts:
+            st.warning(alert, icon="⚠️")
+
+        if unrealised_positions:
+            st.markdown("#### Unrealised Positions")
+            st.dataframe(
+                pd.DataFrame(unrealised_positions),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No unrealised positions found.")
+
+        st.markdown("#### Add Position")
+        with st.form("add_capital_position_form", clear_on_submit=True):
+            cg_asset_name = st.text_input("Asset Name")
+            cg_asset_type = st.selectbox(
+                "Asset Type",
+                options=["equity_mf", "debt_mf", "stock", "real_estate", "other"],
+            )
+            cg_buy_date = st.date_input("Buy Date", value=datetime.now().date())
+            cg_buy_price = st.number_input("Buy Price", min_value=0.0, format="%.2f")
+            cg_units = st.number_input("Units", min_value=0.0, format="%.6f")
+            cg_notes = st.text_input("Notes")
+            if st.form_submit_button("Add Position", use_container_width=True):
+                if cg_asset_name.strip() and cg_units > 0:
+                    new_row = pd.DataFrame(
+                        [
+                            {
+                                "Asset Name": cg_asset_name.strip(),
+                                "Asset Type": cg_asset_type,
+                                "Buy Date": pd.Timestamp(cg_buy_date),
+                                "Buy Price": float(cg_buy_price),
+                                "Sell Date": pd.NaT,
+                                "Sell Price": np.nan,
+                                "Units": float(cg_units),
+                                "Notes": cg_notes,
+                            }
+                        ]
+                    )
+                    st.session_state.capital_gains = pd.concat([st.session_state.capital_gains, new_row], ignore_index=True)
+                    st.success("Position added to table below.")
+                else:
+                    st.warning("Please add asset name and units.")
+
+        edited_cg = st.data_editor(
+            st.session_state.capital_gains,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config={
+                "Asset Name": st.column_config.TextColumn("Asset Name", required=True),
+                "Asset Type": st.column_config.SelectboxColumn(
+                    "Asset Type",
+                    options=["equity_mf", "debt_mf", "stock", "real_estate", "other"],
+                    required=True,
+                ),
+                "Buy Date": st.column_config.DateColumn("Buy Date", format="YYYY-MM-DD"),
+                "Buy Price": st.column_config.NumberColumn("Buy Price", format="%.2f", min_value=0.0),
+                "Sell Date": st.column_config.DateColumn("Sell Date", format="YYYY-MM-DD"),
+                "Sell Price": st.column_config.NumberColumn("Sell Price", format="%.2f", min_value=0.0),
+                "Units": st.column_config.NumberColumn("Units", format="%.6f", min_value=0.0),
+                "Notes": st.column_config.TextColumn("Notes"),
+            },
+            hide_index=True,
+            key="capital_gains_editor",
+        )
+        st.session_state.capital_gains = edited_cg
+
+        if st.button("Save Capital Gains Positions", type="primary", use_container_width=True, key="save_capital_gains"):
+            db.sync_capital_gains(st.session_state.user.id, st.session_state.capital_gains)
+            st.success("Capital gains positions saved.")
+            st.rerun()
 
 
 # ============================================================================
