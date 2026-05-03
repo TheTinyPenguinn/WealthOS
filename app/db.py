@@ -216,6 +216,41 @@ def load_all_data(user_id):
             capital_gains["Buy Date"] = pd.to_datetime(capital_gains["Buy Date"], errors="coerce")
             capital_gains["Sell Date"] = pd.to_datetime(capital_gains["Sell Date"], errors="coerce")
 
+        # Load Insurance Policies
+        ins_res = supabase.table("insurance_policies").select("*").eq("user_id", user_id).execute()
+        insurance_policies = ensure_dataframe_schema(
+            ins_res.data,
+            [
+                "policy_name",
+                "policy_type",
+                "insurer",
+                "annual_premium",
+                "sum_assured",
+                "maturity_value",
+                "start_date",
+                "maturity_date",
+                "is_active",
+                "notes",
+            ],
+        )
+        insurance_policies = insurance_policies.rename(
+            columns={
+                "policy_name": "Policy Name",
+                "policy_type": "Policy Type",
+                "insurer": "Insurer",
+                "annual_premium": "Annual Premium",
+                "sum_assured": "Sum Assured",
+                "maturity_value": "Maturity Value",
+                "start_date": "Start Date",
+                "maturity_date": "Maturity Date",
+                "is_active": "Is Active",
+                "notes": "Notes",
+            }
+        )
+        if not insurance_policies.empty:
+            insurance_policies["Start Date"] = pd.to_datetime(insurance_policies["Start Date"], errors="coerce")
+            insurance_policies["Maturity Date"] = pd.to_datetime(insurance_policies["Maturity Date"], errors="coerce")
+
         return {
             "settings": settings,
             "accounts": accounts,
@@ -227,6 +262,7 @@ def load_all_data(user_id):
             "credit_cards": credit_cards,
             "user_profile": user_profile,
             "capital_gains": capital_gains,
+            "insurance_policies": insurance_policies,
         }
     except Exception as e:
         st.error(f"Error loading database: {e}")
@@ -462,6 +498,35 @@ def sync_capital_gains(user_id, df):
                 supabase.table("capital_gains").insert(payload).execute()
     except Exception as e:
         st.error(f"Capital Gains Sync Error: {e}")
+
+def sync_insurance_policies(user_id, df):
+    """Replace insurance inventory for user."""
+    try:
+        supabase.table("insurance_policies").delete().eq("user_id", user_id).execute()
+        if df is not None and not df.empty:
+            payload = []
+            for _, row in df.iterrows():
+                start_date = pd.to_datetime(row.get("Start Date"), errors="coerce")
+                maturity_date = pd.to_datetime(row.get("Maturity Date"), errors="coerce")
+                payload.append(
+                    {
+                        "user_id": user_id,
+                        "policy_name": str(row.get("Policy Name", "Unknown Policy")),
+                        "policy_type": str(row.get("Policy Type", "other")),
+                        "insurer": str(row.get("Insurer", "")),
+                        "annual_premium": float(row.get("Annual Premium", 0.0)),
+                        "sum_assured": float(row.get("Sum Assured", 0.0)) if pd.notna(row.get("Sum Assured")) else None,
+                        "maturity_value": float(row.get("Maturity Value", 0.0)) if pd.notna(row.get("Maturity Value")) else None,
+                        "start_date": start_date.date().isoformat() if pd.notna(start_date) else None,
+                        "maturity_date": maturity_date.date().isoformat() if pd.notna(maturity_date) else None,
+                        "is_active": bool(row.get("Is Active", True)),
+                        "notes": str(row.get("Notes", "")),
+                    }
+                )
+            if payload:
+                supabase.table("insurance_policies").insert(payload).execute()
+    except Exception as e:
+        st.error(f"Insurance Policies Sync Error: {e}")
 
 def add_expense(user_id, date, desc, amount, category):
     payload = {
