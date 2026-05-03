@@ -99,6 +99,8 @@ def save_all_data_callback():
         db.sync_fixed(user_id, st.session_state.fixed_costs)
         db.sync_obligations(user_id, st.session_state.obligations)
         db.sync_investments(user_id, st.session_state.investments)
+        db.sync_illiquid_assets(user_id, st.session_state.illiquid_assets)
+        db.sync_credit_cards(user_id, st.session_state.credit_cards)
         st.toast("✅ Data synced to cloud", icon="☁️")
     except Exception as e:
         st.error(f"Error syncing data: {e}")
@@ -169,6 +171,9 @@ if not st.session_state.data_loaded:
             st.session_state.obligations = data["obligations"]
             st.session_state.investments = data["investments"]
             st.session_state.expenses = data["expenses"]
+            st.session_state.illiquid_assets = data["illiquid_assets"]
+            st.session_state.credit_cards = data["credit_cards"]
+            st.session_state.user_profile = data["user_profile"] or {}
             
             settings = data["settings"]
             st.session_state.salary = settings.get("salary", 0.0)
@@ -219,6 +224,55 @@ def save_investments(df):
     except Exception as e:
         st.error(f"Error saving investments: {e}")
         return False
+
+# ============================================================================
+# PHASE 2 HELPERS
+# ============================================================================
+
+def profile_risk_details(profile: dict):
+    age = int(profile.get("age", 0) or 0)
+    target_retirement_age = int(profile.get("target_retirement_age", 60) or 60)
+    ytr = target_retirement_age - age
+
+    if ytr < 5:
+        return "conservative", ytr, "80% debt / 20% equity"
+    if ytr < 15:
+        return "balanced", ytr, "50% debt / 50% equity"
+    return "aggressive", ytr, "20% debt / 80% equity"
+
+
+def get_illiquid_net_value():
+    illiquid_df = st.session_state.get("illiquid_assets", pd.DataFrame())
+    if illiquid_df is None or illiquid_df.empty:
+        return 0.0
+    estimated = illiquid_df.get("Estimated Value", pd.Series(dtype=float)).apply(safe_float).sum()
+    loan = illiquid_df.get("Loan Outstanding", pd.Series(dtype=float)).apply(safe_float).sum()
+    return max(0.0, float(estimated - loan))
+
+
+def get_credit_card_intelligence():
+    cards_df = st.session_state.get("credit_cards", pd.DataFrame())
+    if cards_df is None or cards_df.empty:
+        return 0.0, 0.0, []
+
+    total_limit = cards_df.get("Credit Limit", pd.Series(dtype=float)).apply(safe_float).sum()
+    total_outstanding = cards_df.get("Current Outstanding", pd.Series(dtype=float)).apply(safe_float).sum()
+    utilisation_pct = (total_outstanding / total_limit * 100) if total_limit > 0 else 0.0
+
+    revolving_cost = 0.0
+    apr_badges = []
+    for _, row in cards_df.iterrows():
+        outstanding = safe_float(row.get("Current Outstanding", 0.0))
+        min_due = safe_float(row.get("Min Due Amount", 0.0))
+        apr = safe_float(row.get("APR (%)", 0.0))
+        revolve_base = max(0.0, outstanding - min_due)
+        monthly_cost = revolve_base * apr / 1200
+        revolving_cost += monthly_cost
+        if apr > 20:
+            card_name = row.get("Card Name", "Card")
+            apr_badges.append(f"{card_name}: {apr:.1f}% APR — costs Rs {monthly_cost:,.0f}/mo. Kill first.")
+
+    return float(utilisation_pct), float(revolving_cost), apr_badges
 
 # ============================================================================
 # UTILITIES
@@ -730,7 +784,7 @@ def auto_categorize(df, force_overwrite=False):
 # AI CONTEXT ENGINE
 # ============================================================================
 
-def generate_financial_context(net_worth, liquid_cash, total_debt, true_burn, surplus, fixed_living, total_emi, csv_variable_spend, avg_interest):
+def generate_financial_context(net_worth, liquid_net_worth, total_debt, true_burn, surplus, fixed_living, total_emi, csv_variable_spend, avg_interest):
     """Generates a summary string of the user's financial health for the AI using passed arguments."""
     try:
         salary = st.session_state.get('salary', 0.0)
@@ -742,7 +796,7 @@ def generate_financial_context(net_worth, liquid_cash, total_debt, true_burn, su
         - 🚀 INVESTIBLE SURPLUS: ₹{surplus:,.2f} / month ({(surplus/salary*100) if salary > 0 else 0:.1f}%)
 
         🏦 BALANCE SHEET & DEBT:
-        - Liquid Cash: ₹{liquid_cash:,.2f}
+        - Liquid Net Worth: ₹{liquid_net_worth:,.2f}
         - Total Debt Balance: ₹{total_debt:,.2f}
         - True Net Worth: ₹{net_worth:,.2f}
         - Avg Debt Interest Rate: {avg_interest:.1f}%
@@ -836,14 +890,14 @@ def analyze_subscriptions(df):
     except Exception:
         return pd.DataFrame()
 
-def plot_runway_impact(liquid_cash, monthly_burn, upi_bleed):
+def plot_runway_impact(liquid_net_worth, monthly_burn, upi_bleed):
     """Create runway impact visualization with gain calculation."""
     try:
         if monthly_burn <= 0:
             return None
             
-        current_runway = liquid_cash / monthly_burn
-        potential_runway = liquid_cash / max(1, (monthly_burn - upi_bleed))
+        current_runway = liquid_net_worth / monthly_burn
+        potential_runway = liquid_net_worth / max(1, (monthly_burn - upi_bleed))
         gain = potential_runway - current_runway
         
         if not PLOTLY_AVAILABLE:
@@ -1012,14 +1066,24 @@ def calculate_metrics(expenses_df, investments_df, accounts_df):
         if not portfolio.empty and 'Current_Value' in portfolio.columns:
             csv_portfolio_value = portfolio['Current_Value'].sum()
 
-    # Final Totals (Fixed: Use only total_debt_balance from Obligations)
+    # 7. Illiquid assets (net of associated loans)
+    illiquid_net = get_illiquid_net_value()
+
+    # Final Totals
     total_portfolio = csv_portfolio_value + investments_sidebar
     net_liquidity = bank_cash - credit_card 
-    # FIXED: Use total_debt_balance as definitive debt source (no double counting)
-    total_debt_all = total_debt_balance
-    net_worth = (net_liquidity + total_portfolio) - total_debt_balance
+    # Include credit card outstanding in dedicated module to debt accounting.
+    cards_df = st.session_state.get("credit_cards", pd.DataFrame())
+    credit_card_outstanding = 0.0
+    if cards_df is not None and not cards_df.empty:
+        credit_card_outstanding = cards_df.get("Current Outstanding", pd.Series(dtype=float)).apply(safe_float).sum()
 
-    return net_worth, net_liquidity, total_debt_all, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs
+    total_debt_balance += credit_card_outstanding
+    total_debt_all = total_debt_balance
+    net_worth = (net_liquidity + total_portfolio + illiquid_net) - total_debt_balance
+    liquid_net_worth = net_worth - illiquid_net
+
+    return net_worth, liquid_net_worth, total_debt_all, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs, illiquid_net
 
 
 # ============================================================================
@@ -1028,6 +1092,43 @@ def calculate_metrics(expenses_df, investments_df, accounts_df):
 
 if 'parsed_csv' not in st.session_state:
     st.session_state.parsed_csv = pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Category'])
+
+if 'illiquid_assets' not in st.session_state:
+    st.session_state.illiquid_assets = pd.DataFrame(
+        columns=["Asset Type", "Name", "Estimated Value", "Loan Outstanding", "Notes"]
+    )
+if 'credit_cards' not in st.session_state:
+    st.session_state.credit_cards = pd.DataFrame(
+        columns=["Card Name", "Credit Limit", "Current Outstanding", "Billing Date", "Payment Due Date", "APR (%)", "Min Due Amount"]
+    )
+if 'user_profile' not in st.session_state:
+    st.session_state.user_profile = {}
+
+# --- PROFILE SETUP PAGE FOR FIRST-TIME USERS ---
+if not st.session_state.user_profile or st.session_state.user_profile.get("age") is None:
+    st.title("👤 Profile Setup")
+    st.caption("Set up your profile to unlock retirement-based risk guidance.")
+    with st.form("profile_setup_form"):
+        age = st.number_input("Age", min_value=18, max_value=100, value=28)
+        target_retirement_age = st.number_input("Target Retirement Age", min_value=40, max_value=80, value=60)
+        monthly_income = st.number_input("Monthly Income (₹)", min_value=0.0, value=float(st.session_state.get("salary", 0.0)))
+        income_type = st.selectbox("Income Type", options=["salaried", "freelance", "business"])
+        tax_bracket = st.number_input("Tax Bracket (%)", min_value=0, max_value=50, value=30)
+        tax_regime = st.selectbox("Tax Regime", options=["new", "old"], index=0)
+        if st.form_submit_button("Save Profile", use_container_width=True):
+            profile_payload = {
+                "age": age,
+                "target_retirement_age": target_retirement_age,
+                "monthly_income": monthly_income,
+                "income_type": income_type,
+                "tax_bracket": tax_bracket,
+                "tax_regime": tax_regime,
+            }
+            db.upsert_user_profile(st.session_state.user.id, profile_payload)
+            st.session_state.user_profile = profile_payload
+            st.success("Profile saved.")
+            st.rerun()
+    st.stop()
 
 # --- SIDEBAR - RICH CLASSIC DESIGN ---
 st.sidebar.title("💰 WealthOS v5")
@@ -1040,7 +1141,7 @@ with st.sidebar.expander("📣 Report Bug / Suggest Idea", expanded=False):
         f_details = st.text_area("Details", help="Please describe the issue or suggestion.")
         if st.form_submit_button("Submit Feedback", use_container_width=True):
             if f_details:
-                net_worth, liquid_cash, total_debt, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs = calculate_metrics(
+                net_worth, liquid_net_worth, total_debt, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs, illiquid_net = calculate_metrics(
                     st.session_state.expenses,
                     st.session_state.investments,
                     st.session_state.accounts
@@ -1048,7 +1149,7 @@ with st.sidebar.expander("📣 Report Bug / Suggest Idea", expanded=False):
                 metadata = {
                     "model": st.session_state.get('selected_model'),
                     "net_worth": net_worth,
-                    "liquid_cash": liquid_cash,
+                    "liquid_net_worth": liquid_net_worth,
                     "total_debt": total_debt
                 }
                 if db.insert_feedback(st.session_state.user.id, f_type, f_details, metadata):
@@ -1174,6 +1275,44 @@ with st.sidebar.expander("💳 Financial Obligations", expanded=False):
     )
     st.session_state.obligations = obligations
 
+with st.sidebar.expander("🏠 Illiquid Assets", expanded=False):
+    illiquid_assets = st.data_editor(
+        st.session_state.illiquid_assets,
+        column_config={
+            "Asset Type": st.column_config.SelectboxColumn("Asset Type", options=["real_estate", "epf", "ppf", "nps", "other"]),
+            "Name": st.column_config.TextColumn("Name", required=True),
+            "Estimated Value": st.column_config.NumberColumn("Estimated Value (₹)", format="₹%.2f", min_value=0.0),
+            "Loan Outstanding": st.column_config.NumberColumn("Loan Outstanding (₹)", format="₹%.2f", min_value=0.0),
+            "Notes": st.column_config.TextColumn("Notes"),
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="dynamic",
+        key="sidebar_illiquid_editor_v1",
+        on_change=save_all_data_callback,
+    )
+    st.session_state.illiquid_assets = illiquid_assets
+
+with st.sidebar.expander("💳 Credit Cards", expanded=False):
+    credit_cards = st.data_editor(
+        st.session_state.credit_cards,
+        column_config={
+            "Card Name": st.column_config.TextColumn("Card Name", required=True),
+            "Credit Limit": st.column_config.NumberColumn("Credit Limit (₹)", format="₹%.2f", min_value=0.0),
+            "Current Outstanding": st.column_config.NumberColumn("Outstanding (₹)", format="₹%.2f", min_value=0.0),
+            "Billing Date": st.column_config.NumberColumn("Billing Date", min_value=1, max_value=31, step=1),
+            "Payment Due Date": st.column_config.NumberColumn("Due Date", min_value=1, max_value=31, step=1),
+            "APR (%)": st.column_config.NumberColumn("APR (%)", min_value=0.0, max_value=100.0, format="%.2f"),
+            "Min Due Amount": st.column_config.NumberColumn("Min Due (₹)", format="₹%.2f", min_value=0.0),
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="dynamic",
+        key="sidebar_credit_cards_editor_v1",
+        on_change=save_all_data_callback,
+    )
+    st.session_state.credit_cards = credit_cards
+
 # 5. ➕ Quick Entry
 with st.sidebar.expander("➕ Quick Entry", expanded=False):
     # Tabbed approach for cleaner Quick Entry
@@ -1266,7 +1405,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 I
 with tab1:
     # Calculate Cash Flow First metrics for high-income users
     salary = safe_float(st.session_state.get('salary', 0.0))
-    net_worth, liquid_cash, total_debt, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs = calculate_metrics(
+    net_worth, liquid_net_worth, total_debt, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs, illiquid_net = calculate_metrics(
         st.session_state.expenses,
         st.session_state.investments,
         st.session_state.accounts
@@ -1292,10 +1431,10 @@ with tab1:
     # --- METRICS ROW ---
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("True Net Worth", f"₹{net_worth:,.0f}", delta="Total Wealth")
+        st.metric("Total Net Worth", f"₹{net_worth:,.0f}", delta="All assets - all liabilities")
     with col2:
         surplus_color = "normal" if surplus > 0 else "inverse"
-        st.metric("Net Liquidity", f"₹{liquid_cash:,.0f}", delta_color=surplus_color, help="Available cash after credit card debt")
+        st.metric("Liquid Net Worth", f"₹{liquid_net_worth:,.0f}", delta_color=surplus_color, help="Total NW excluding illiquid net assets")
     with col3:
         st.metric("Debt Interest Burn", f"₹{monthly_interest_burn:,.0f}", delta_color="inverse", help="Money lost to interest every month")
     with col4:
@@ -1358,9 +1497,18 @@ with tab1:
     st.subheader("🔮 Future Simulation")
     
     # Runway Extender Chart
-    runway_chart = plot_runway_impact(liquid_cash, true_burn, upi_bleed)
+    runway_chart = plot_runway_impact(liquid_net_worth, true_burn, upi_bleed)
     if runway_chart:
         st.plotly_chart(runway_chart, use_container_width=True)
+
+    utilisation_pct, revolving_cost, apr_badges = get_credit_card_intelligence()
+    ccu1, ccu2 = st.columns(2)
+    with ccu1:
+        st.metric("Credit Utilisation", f"{utilisation_pct:.1f}%")
+    with ccu2:
+        st.metric("Revolving Cost", f"₹{revolving_cost:,.0f}/mo")
+    for badge in apr_badges:
+        st.error(badge)
     
     # Detected Recurring Expenses
     subscriptions = analyze_subscriptions(st.session_state.expenses)
@@ -1796,6 +1944,12 @@ with tab4:
     
     # --- CONNECTION DOCTOR & SETTINGS ---
     with st.expander("🛠️ AI Settings & Status", expanded=False):
+        risk_profile, ytr, allocation = profile_risk_details(st.session_state.user_profile)
+        risk_system_prompt = (
+            f"User profile context: risk_profile={risk_profile}, "
+            f"age={st.session_state.user_profile.get('age')}, years_to_retirement={ytr}, "
+            f"target_allocation={allocation}."
+        )
         c1, c2 = st.columns([2, 1])
         with c1:
             if st.button("Check API Access"):
@@ -1803,6 +1957,7 @@ with tab4:
                     provider = _get_secret_or_env("LLM_PROVIDER", "gemini").lower() or "gemini"
                     call_llm(
                         "Reply with OK.",
+                        system_prompt=risk_system_prompt,
                         model=st.session_state.get("selected_model", "gemini-1.5-flash"),
                         api_key=st.session_state.api_key,
                         provider=provider,
@@ -1847,7 +2002,7 @@ with tab4:
             with st.spinner("Thinking..."):
                 try:
                     # 1. Get Context (Fixed: Pass all required parameters)
-                    financial_context = generate_financial_context(net_worth, liquid_cash, total_debt, true_burn, surplus, fixed_living, total_emi, csv_variable_spend, avg_interest)
+                    financial_context = generate_financial_context(net_worth, liquid_net_worth, total_debt, true_burn, surplus, fixed_living, total_emi, csv_variable_spend, avg_interest)
                     
                     # 2. Prompt
                     full_prompt = f"""
@@ -1868,6 +2023,7 @@ with tab4:
                     provider = _get_secret_or_env("LLM_PROVIDER", "gemini").lower() or "gemini"
                     response_text = call_llm(
                         full_prompt,
+                        system_prompt=risk_system_prompt,
                         model=st.session_state.selected_model,
                         api_key=st.session_state.api_key,
                         provider=provider,
