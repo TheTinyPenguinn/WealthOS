@@ -50,19 +50,32 @@ def _determine_risk(profile: dict) -> str:
 
 
 def _income_and_regime(user_id: str, supabase):
-    profile_res = supabase.table("user_profile").select("*").eq("user_id", user_id).limit(1).execute()
-    if profile_res.data:
-        p = profile_res.data[0]
-        return _safe_float(p.get("monthly_income"), 0.0), p.get("tax_regime", "new")
-    settings_res = supabase.table("user_settings").select("salary").eq("user_id", user_id).limit(1).execute()
-    salary = _safe_float(settings_res.data[0].get("salary"), 0.0) if settings_res.data else 0.0
+    try:
+        profile_res = supabase.table("user_profile").select("*").eq("user_id", user_id).limit(1).execute()
+        if profile_res.data:
+            p = profile_res.data[0]
+            return _safe_float(p.get("monthly_income"), 0.0), p.get("tax_regime", "new")
+    except Exception:
+        pass
+
+    try:
+        settings_res = supabase.table("user_settings").select("salary").eq("user_id", user_id).limit(1).execute()
+        salary = _safe_float(settings_res.data[0].get("salary"), 0.0) if settings_res.data else 0.0
+    except Exception:
+        salary = 0.0
     return salary, "new"
 
 
 def get_user_profile(user_id: str, supabase) -> dict:
-    profile_res = supabase.table("user_profile").select("*").eq("user_id", user_id).limit(1).execute()
-    profile = profile_res.data[0] if profile_res.data else {}
-    ef = get_ef_status(user_id, supabase)
+    try:
+        profile_res = supabase.table("user_profile").select("*").eq("user_id", user_id).limit(1).execute()
+        profile = profile_res.data[0] if profile_res.data else {}
+    except Exception:
+        profile = {}
+    try:
+        ef = get_ef_status(user_id, supabase)
+    except Exception:
+        ef = {"status": "building"}
     return {
         "name": profile.get("name", "User"),
         "age": int(profile.get("age") or 0),
@@ -86,15 +99,28 @@ def _financial_snapshot(user_id: str, supabase) -> dict:
     manual_inv = sum(_safe_float(r.get("balance"), 0.0) for r in acc_rows if "Investment" in str(r.get("type", "")))
     market_inv = sum(_safe_float(r.get("quantity"), 0.0) * _safe_float(r.get("avg_buy_price"), 0.0) for r in inv_rows)
     loan_balance = sum(_safe_float(r.get("current_balance"), 0.0) for r in obligations if str(r.get("type")).lower() == "loan")
+    high_apr_emi = sum(
+        _safe_float(r.get("monthly_emi"), 0.0)
+        for r in obligations
+        if _safe_float(r.get("interest_rate"), 0.0) > 12.0
+    )
 
     liquid_nw = bank_cash + manual_inv + market_inv - loan_balance - cc
     runway = liquid_nw / burn if burn > 0 else 0.0
     return {
         "liquid_nw": liquid_nw,
+        "liquid_net_worth": liquid_nw,
+        "monthly_income": monthly_income,
         "monthly_burn": burn,
         "surplus": surplus,
+        "monthly_savings": surplus,
+        "high_apr_emi": high_apr_emi,
         "runway_months": runway,
     }
+
+
+def get_financial_snapshot(user_id: str, supabase) -> dict:
+    return _financial_snapshot(user_id, supabase)
 
 
 def _simulate_loan(user_id: str, supabase, principal: float, apr: float, tenure_months: int) -> dict:
@@ -200,10 +226,19 @@ def dispatch_tool(name, args, user_id, supabase) -> dict:
     return result
 
 
-def run_agent(query: str, user_id: str, supabase) -> str:
+def run_agent_with_trace(
+    query: str,
+    user_id: str,
+    supabase,
+    *,
+    api_key: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+):
     profile = get_user_profile(user_id, supabase)
     system = SYSTEM.format(**profile)
     messages = [{"role": "user", "content": query}]
+    tool_events = []
 
     lf = _langfuse_client()
     trace = lf.trace(name="wealthos-cfo", user_id=user_id) if lf else None
@@ -211,12 +246,27 @@ def run_agent(query: str, user_id: str, supabase) -> str:
 
     try:
         for _ in range(6):
-            resp = call_llm(system, messages, TOOLS)
+            resp = call_llm(
+                system,
+                messages,
+                TOOLS,
+                api_key=api_key,
+                provider=provider,
+                model=model,
+                max_tokens=2048,
+            )
             tool_call = resp.get("tool_call") if isinstance(resp, dict) else None
             if tool_call:
                 tool_name = tool_call.get("name")
                 tool_args = tool_call.get("arguments", {})
                 result = dispatch_tool(tool_name, tool_args, user_id, supabase)
+                tool_events.append(
+                    {
+                        "tool_name": tool_name,
+                        "arguments": tool_args,
+                        "output": result,
+                    }
+                )
                 if trace:
                     try:
                         trace.event(name=tool_name, input=tool_args, output=str(result))
@@ -225,11 +275,16 @@ def run_agent(query: str, user_id: str, supabase) -> str:
                 messages.append({"role": "tool", "name": tool_name, "content": str(result)})
             else:
                 text = resp.get("text", "") if isinstance(resp, dict) else str(resp)
-                return text or "Analysis incomplete. Try rephrasing."
-        return "Analysis incomplete. Try rephrasing."
+                return (text or "Analysis incomplete. Try rephrasing.", tool_events)
+        return ("Analysis incomplete. Try rephrasing.", tool_events)
     finally:
         if span:
             try:
                 span.end()
             except Exception:
                 pass
+
+
+def run_agent(query: str, user_id: str, supabase, **llm_kwargs) -> str:
+    text, _ = run_agent_with_trace(query, user_id, supabase, **llm_kwargs)
+    return text

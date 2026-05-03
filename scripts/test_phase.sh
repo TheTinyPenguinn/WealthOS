@@ -4,12 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "[1/11] Syntax compile checks"
+echo "[1/12] Syntax compile checks"
 PYTHONPYCACHEPREFIX="$ROOT_DIR/.pycache_tmp" python3 - <<'PY'
 import py_compile
 
 files = [
     "app/app.py",
+    "app/utils/bank_statement_csv.py",
     "app/db.py",
     "app/migrate.py",
     "app/data_providers/amfi.py",
@@ -23,6 +24,8 @@ files = [
     "app/tax/capital_gains.py",
     "app/insurance/audit.py",
     "app/goals/sequencer.py",
+    "app/scoring/__init__.py",
+    "app/scoring/freedom_score.py",
     "ai/tools.py",
     "ai/agent.py",
     "scripts/run.py",
@@ -32,7 +35,7 @@ for f in files:
 print("PASS: syntax compilation")
 PY
 
-echo "[2/11] LLM client modular tests"
+echo "[2/12] LLM client modular tests"
 python3 - <<'PY'
 import os
 import importlib.util
@@ -66,7 +69,7 @@ assert "tool_call" in agent_resp and "text" in agent_resp
 print("PASS: llm_client behavior")
 PY
 
-echo "[3/11] AMFI + FX provider cache tests"
+echo "[3/12] AMFI + FX provider cache tests"
 python3 - <<'PY'
 import io
 import json
@@ -190,7 +193,7 @@ finally:
 print("PASS: amfi/fx caching and conversion")
 PY
 
-echo "[4/11] Phase wiring contract checks"
+echo "[4/12] Phase wiring contract checks"
 python3 - <<'PY'
 from pathlib import Path
 
@@ -202,7 +205,8 @@ env_text = Path(".env.example").read_text(encoding="utf-8")
 assert "call_llm(" in app_text
 assert "profile_risk_details" in app_text
 assert "from ai.agent import run_agent" in app_text
-assert "run_agent(user_query, st.session_state.user.id, db.supabase)" in app_text
+assert "_llm_runtime_kwargs()" in app_text
+assert "run_agent(" in app_text and "user_query" in app_text and "db.supabase" in app_text
 assert "plot_runway_impact(liquid_net_worth" in app_text
 assert "st.session_state.illiquid_assets" in app_text
 assert "st.session_state.credit_cards" in app_text
@@ -255,7 +259,37 @@ for key in (
 print("PASS: phase contract wiring")
 PY
 
-echo "[5/11] OCR parser + privacy tests"
+echo "[5/12] Bank statement CSV parser tests"
+python3 - <<'PY'
+import sys
+
+sys.path.insert(0, ".")
+from app.utils.bank_statement_csv import parse_bank_statement_csv_from_bytes
+
+csv1 = b"date,description,amount,category\n2026-03-15,Test,-99.5,Needs\n"
+df, err = parse_bank_statement_csv_from_bytes(csv1)
+assert err is None and df is not None and len(df) == 1
+assert abs(float(df.iloc[0]["Amount"]) + 99.5) < 1e-9
+
+csv2 = "\ufeffdate,description,amount\n2026-03-16,X,10".encode()
+df2, err2 = parse_bank_statement_csv_from_bytes(csv2)
+assert err2 is None and df2 is not None and len(df2) == 1
+
+csv3 = "Transaction Date;Amount;Description\n15-03-2026;-50;Coffee\n".encode()
+df3, err3 = parse_bank_statement_csv_from_bytes(csv3)
+assert err3 is None and df3 is not None and len(df3) == 1
+
+csv4 = b"Some bank\nAccount statement\n\ndate,amount,description\n01-04-2026,100,Salary\n"
+df4, err4 = parse_bank_statement_csv_from_bytes(csv4)
+assert err4 is None and df4 is not None and len(df4) == 1
+
+_, err5 = parse_bank_statement_csv_from_bytes(b"not,a,reasonable\nfoo,1,2\n")
+assert err5 is not None
+
+print("PASS: bank CSV parser")
+PY
+
+echo "[6/12] OCR parser + privacy tests"
 python3 - <<'PY'
 import sys
 sys.path.insert(0, ".")
@@ -328,7 +362,7 @@ finally:
 print("PASS: OCR parser privacy + zero-retention flow")
 PY
 
-echo "[6/11] Tax module tests"
+echo "[7/12] Tax module tests"
 python3 - <<'PY'
 from app.tax.deductions import get_deductions_summary
 from app.tax.regime_compare import calc_tax, compare_regimes
@@ -393,7 +427,7 @@ assert isinstance(pdf, (bytes, bytearray)) and len(pdf) > 100
 print("PASS: tax modules")
 PY
 
-echo "[7/11] Capital gains module tests"
+echo "[8/12] Capital gains module tests"
 python3 - <<'PY'
 import app.tax.capital_gains as cg
 
@@ -442,7 +476,7 @@ finally:
 print("PASS: capital gains module")
 PY
 
-echo "[8/11] Insurance audit module tests"
+echo "[9/12] Insurance audit module tests"
 python3 - <<'PY'
 from app.insurance.audit import audit_life_cover, audit_health_cover, detect_endowment_traps
 
@@ -511,7 +545,7 @@ assert traps and traps[0]["policy_name"] == "ULIP X"
 print("PASS: insurance audit module")
 PY
 
-echo "[9/11] Goals sequencer tests"
+echo "[10/12] Goals sequencer tests"
 python3 - <<'PY'
 from app.goals.sequencer import get_ef_status, allocate_surplus
 
@@ -567,7 +601,7 @@ assert isinstance(alloc, list) and len(alloc) > 0
 print("PASS: goals sequencer")
 PY
 
-echo "[10/11] AI agent tool-dispatch tests"
+echo "[11/12] AI agent tool-dispatch tests"
 python3 - <<'PY'
 import ai.agent as agent
 
@@ -620,7 +654,7 @@ assert "life" in audit and "health" in audit
 print("PASS: agent dispatch")
 PY
 
-echo "[11/11] Quick streamlit route check (already-running app preferred)"
+echo "[12/12] Quick streamlit route check (already-running app preferred)"
 if command -v curl >/dev/null 2>&1; then
   if curl -sS -o /tmp/wealthos_health.html -w "%{http_code}" "http://127.0.0.1:8514" | grep -q "200"; then
     echo "PASS: streamlit reachable at http://127.0.0.1:8514"

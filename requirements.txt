@@ -3,6 +3,7 @@ pandas
 numpy
 plotly
 yfinance
+# LLM backends (match LLM_PROVIDER in .env — install the one(s) you use)
 google-generativeai
 openai
 anthropic

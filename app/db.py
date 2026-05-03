@@ -9,9 +9,42 @@ import plotly.graph_objects as go
 import re
 import os
 import time
+from pathlib import Path
+
+
+def _load_local_env():
+    """
+    Lightweight .env loader so Streamlit runs work even when the shell
+    did not `source .env` first.
+    """
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return
+    try:
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except Exception:
+        # Non-fatal; env can still be provided by shell/secrets.
+        pass
+
+
+_load_local_env()
 
 def _get_secret_or_env(key: str) -> str:
-    return str(st.secrets.get(key, os.getenv(key, ""))).strip()
+    env_value = str(os.getenv(key, "")).strip()
+    if env_value:
+        return env_value
+    try:
+        return str(st.secrets.get(key, "")).strip()
+    except Exception:
+        return ""
 
 def _safe_int(value, default=1):
     try:
@@ -28,8 +61,8 @@ def get_supabase_client():
     key = _get_secret_or_env("SUPABASE_ANON_KEY") or _get_secret_or_env("SUPABASE_SERVICE_ROLE_KEY")
     
     if not url or not key:
-        st.error("Missing Supabase credentials in Streamlit Secrets.")
-        st.info("Please add SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY).")
+        st.error("Missing Supabase credentials.")
+        st.info("Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY) via env vars or secrets.toml.")
         st.stop()
         
     try:
@@ -139,161 +172,190 @@ def load_all_data(user_id):
         if not expenses.empty:
             expenses["Date"] = pd.to_datetime(expenses["Date"]).dt.tz_localize(None)
 
-        # Load Illiquid Assets
-        illiquid_res = supabase.table("illiquid_assets").select("*").eq("user_id", user_id).execute()
-        illiquid_assets = ensure_dataframe_schema(
-            illiquid_res.data,
-            ["asset_type", "name", "estimated_value", "loan_outstanding", "notes"],
-        )
-        illiquid_assets = illiquid_assets.rename(
-            columns={
-                "asset_type": "Asset Type",
-                "name": "Name",
-                "estimated_value": "Estimated Value",
-                "loan_outstanding": "Loan Outstanding",
-                "notes": "Notes",
-            }
-        )
+        # Load Illiquid Assets (optional in older schemas)
+        try:
+            illiquid_res = supabase.table("illiquid_assets").select("*").eq("user_id", user_id).execute()
+            illiquid_assets = ensure_dataframe_schema(
+                illiquid_res.data,
+                ["asset_type", "name", "estimated_value", "loan_outstanding", "notes"],
+            )
+            illiquid_assets = illiquid_assets.rename(
+                columns={
+                    "asset_type": "Asset Type",
+                    "name": "Name",
+                    "estimated_value": "Estimated Value",
+                    "loan_outstanding": "Loan Outstanding",
+                    "notes": "Notes",
+                }
+            )
+        except Exception:
+            illiquid_assets = pd.DataFrame(columns=["Asset Type", "Name", "Estimated Value", "Loan Outstanding", "Notes"])
 
-        # Load Credit Cards
-        cards_res = supabase.table("credit_cards").select("*").eq("user_id", user_id).execute()
-        credit_cards = ensure_dataframe_schema(
-            cards_res.data,
-            [
-                "card_name",
-                "credit_limit",
-                "current_outstanding",
-                "billing_date",
-                "payment_due_date",
-                "apr_percent",
-                "min_due_amount",
-            ],
-        )
-        credit_cards = credit_cards.rename(
-            columns={
-                "card_name": "Card Name",
-                "credit_limit": "Credit Limit",
-                "current_outstanding": "Current Outstanding",
-                "billing_date": "Billing Date",
-                "payment_due_date": "Payment Due Date",
-                "apr_percent": "APR (%)",
-                "min_due_amount": "Min Due Amount",
-            }
-        )
+        # Load Credit Cards (optional in older schemas)
+        try:
+            cards_res = supabase.table("credit_cards").select("*").eq("user_id", user_id).execute()
+            credit_cards = ensure_dataframe_schema(
+                cards_res.data,
+                [
+                    "card_name",
+                    "credit_limit",
+                    "current_outstanding",
+                    "billing_date",
+                    "payment_due_date",
+                    "apr_percent",
+                    "min_due_amount",
+                ],
+            )
+            credit_cards = credit_cards.rename(
+                columns={
+                    "card_name": "Card Name",
+                    "credit_limit": "Credit Limit",
+                    "current_outstanding": "Current Outstanding",
+                    "billing_date": "Billing Date",
+                    "payment_due_date": "Payment Due Date",
+                    "apr_percent": "APR (%)",
+                    "min_due_amount": "Min Due Amount",
+                }
+            )
+        except Exception:
+            credit_cards = pd.DataFrame(
+                columns=["Card Name", "Credit Limit", "Current Outstanding", "Billing Date", "Payment Due Date", "APR (%)", "Min Due Amount"]
+            )
 
-        # Load User Profile
-        profile_res = supabase.table("user_profile").select("*").eq("user_id", user_id).limit(1).execute()
-        user_profile = profile_res.data[0] if profile_res.data else {}
+        # Load User Profile (optional in older schemas)
+        try:
+            profile_res = supabase.table("user_profile").select("*").eq("user_id", user_id).limit(1).execute()
+            user_profile = profile_res.data[0] if profile_res.data else {}
+        except Exception:
+            user_profile = {}
 
-        # Load Capital Gains
-        cg_res = supabase.table("capital_gains").select("*").eq("user_id", user_id).execute()
-        capital_gains = ensure_dataframe_schema(
-            cg_res.data,
-            [
-                "asset_name",
-                "asset_type",
-                "buy_date",
-                "buy_price",
-                "sell_date",
-                "sell_price",
-                "units",
-                "notes",
-            ],
-        )
-        capital_gains = capital_gains.rename(
-            columns={
-                "asset_name": "Asset Name",
-                "asset_type": "Asset Type",
-                "buy_date": "Buy Date",
-                "buy_price": "Buy Price",
-                "sell_date": "Sell Date",
-                "sell_price": "Sell Price",
-                "units": "Units",
-                "notes": "Notes",
-            }
-        )
-        if not capital_gains.empty:
-            capital_gains["Buy Date"] = pd.to_datetime(capital_gains["Buy Date"], errors="coerce")
-            capital_gains["Sell Date"] = pd.to_datetime(capital_gains["Sell Date"], errors="coerce")
+        # Load Capital Gains (optional in older schemas)
+        try:
+            cg_res = supabase.table("capital_gains").select("*").eq("user_id", user_id).execute()
+            capital_gains = ensure_dataframe_schema(
+                cg_res.data,
+                [
+                    "asset_name",
+                    "asset_type",
+                    "buy_date",
+                    "buy_price",
+                    "sell_date",
+                    "sell_price",
+                    "units",
+                    "notes",
+                ],
+            )
+            capital_gains = capital_gains.rename(
+                columns={
+                    "asset_name": "Asset Name",
+                    "asset_type": "Asset Type",
+                    "buy_date": "Buy Date",
+                    "buy_price": "Buy Price",
+                    "sell_date": "Sell Date",
+                    "sell_price": "Sell Price",
+                    "units": "Units",
+                    "notes": "Notes",
+                }
+            )
+            if not capital_gains.empty:
+                capital_gains["Buy Date"] = pd.to_datetime(capital_gains["Buy Date"], errors="coerce")
+                capital_gains["Sell Date"] = pd.to_datetime(capital_gains["Sell Date"], errors="coerce")
+        except Exception:
+            capital_gains = pd.DataFrame(
+                columns=["Asset Name", "Asset Type", "Buy Date", "Buy Price", "Sell Date", "Sell Price", "Units", "Notes"]
+            )
 
-        # Load Insurance Policies
-        ins_res = supabase.table("insurance_policies").select("*").eq("user_id", user_id).execute()
-        insurance_policies = ensure_dataframe_schema(
-            ins_res.data,
-            [
-                "policy_name",
-                "policy_type",
-                "insurer",
-                "annual_premium",
-                "sum_assured",
-                "maturity_value",
-                "start_date",
-                "maturity_date",
-                "is_active",
-                "notes",
-            ],
-        )
-        insurance_policies = insurance_policies.rename(
-            columns={
-                "policy_name": "Policy Name",
-                "policy_type": "Policy Type",
-                "insurer": "Insurer",
-                "annual_premium": "Annual Premium",
-                "sum_assured": "Sum Assured",
-                "maturity_value": "Maturity Value",
-                "start_date": "Start Date",
-                "maturity_date": "Maturity Date",
-                "is_active": "Is Active",
-                "notes": "Notes",
-            }
-        )
-        if not insurance_policies.empty:
-            insurance_policies["Start Date"] = pd.to_datetime(insurance_policies["Start Date"], errors="coerce")
-            insurance_policies["Maturity Date"] = pd.to_datetime(insurance_policies["Maturity Date"], errors="coerce")
+        # Load Insurance Policies (optional in older schemas)
+        try:
+            ins_res = supabase.table("insurance_policies").select("*").eq("user_id", user_id).execute()
+            insurance_policies = ensure_dataframe_schema(
+                ins_res.data,
+                [
+                    "policy_name",
+                    "policy_type",
+                    "insurer",
+                    "annual_premium",
+                    "sum_assured",
+                    "maturity_value",
+                    "start_date",
+                    "maturity_date",
+                    "is_active",
+                    "notes",
+                ],
+            )
+            insurance_policies = insurance_policies.rename(
+                columns={
+                    "policy_name": "Policy Name",
+                    "policy_type": "Policy Type",
+                    "insurer": "Insurer",
+                    "annual_premium": "Annual Premium",
+                    "sum_assured": "Sum Assured",
+                    "maturity_value": "Maturity Value",
+                    "start_date": "Start Date",
+                    "maturity_date": "Maturity Date",
+                    "is_active": "Is Active",
+                    "notes": "Notes",
+                }
+            )
+            if not insurance_policies.empty:
+                insurance_policies["Start Date"] = pd.to_datetime(insurance_policies["Start Date"], errors="coerce")
+                insurance_policies["Maturity Date"] = pd.to_datetime(insurance_policies["Maturity Date"], errors="coerce")
+        except Exception:
+            insurance_policies = pd.DataFrame(
+                columns=["Policy Name", "Policy Type", "Insurer", "Annual Premium", "Sum Assured", "Maturity Value", "Start Date", "Maturity Date", "Is Active", "Notes"]
+            )
 
-        # Load Emergency Fund
-        ef_res = supabase.table("emergency_fund").select("*").eq("user_id", user_id).limit(1).execute()
-        if ef_res.data:
-            ef_row = ef_res.data[0]
-            emergency_fund = {
-                "Target Months": int(ef_row.get("target_months") or 6),
-                "Current Amount": float(ef_row.get("current_amount") or 0.0),
-                "Account Name": ef_row.get("account_name", ""),
-            }
-        else:
+        # Load Emergency Fund (optional in older schemas)
+        try:
+            ef_res = supabase.table("emergency_fund").select("*").eq("user_id", user_id).limit(1).execute()
+            if ef_res.data:
+                ef_row = ef_res.data[0]
+                emergency_fund = {
+                    "Target Months": int(ef_row.get("target_months") or 6),
+                    "Current Amount": float(ef_row.get("current_amount") or 0.0),
+                    "Account Name": ef_row.get("account_name", ""),
+                }
+            else:
+                emergency_fund = {"Target Months": 6, "Current Amount": 0.0, "Account Name": ""}
+        except Exception:
             emergency_fund = {"Target Months": 6, "Current Amount": 0.0, "Account Name": ""}
 
-        # Load Goals
-        goals_res = supabase.table("goals").select("*").eq("user_id", user_id).order("priority").execute()
-        goals = ensure_dataframe_schema(
-            goals_res.data,
-            [
-                "name",
-                "goal_type",
-                "target_amount",
-                "target_date",
-                "current_amount",
-                "priority",
-                "is_ring_fenced",
-                "recommended_instrument",
-                "notes",
-            ],
-        )
-        goals = goals.rename(
-            columns={
-                "name": "Name",
-                "goal_type": "Goal Type",
-                "target_amount": "Target Amount",
-                "target_date": "Target Date",
-                "current_amount": "Current Amount",
-                "priority": "Priority",
-                "is_ring_fenced": "Ring Fenced",
-                "recommended_instrument": "Recommended Instrument",
-                "notes": "Notes",
-            }
-        )
-        if not goals.empty:
-            goals["Target Date"] = pd.to_datetime(goals["Target Date"], errors="coerce")
+        # Load Goals (optional in older schemas)
+        try:
+            goals_res = supabase.table("goals").select("*").eq("user_id", user_id).order("priority").execute()
+            goals = ensure_dataframe_schema(
+                goals_res.data,
+                [
+                    "name",
+                    "goal_type",
+                    "target_amount",
+                    "target_date",
+                    "current_amount",
+                    "priority",
+                    "is_ring_fenced",
+                    "recommended_instrument",
+                    "notes",
+                ],
+            )
+            goals = goals.rename(
+                columns={
+                    "name": "Name",
+                    "goal_type": "Goal Type",
+                    "target_amount": "Target Amount",
+                    "target_date": "Target Date",
+                    "current_amount": "Current Amount",
+                    "priority": "Priority",
+                    "is_ring_fenced": "Ring Fenced",
+                    "recommended_instrument": "Recommended Instrument",
+                    "notes": "Notes",
+                }
+            )
+            if not goals.empty:
+                goals["Target Date"] = pd.to_datetime(goals["Target Date"], errors="coerce")
+        except Exception:
+            goals = pd.DataFrame(
+                columns=["Name", "Goal Type", "Target Amount", "Target Date", "Current Amount", "Priority", "Ring Fenced", "Recommended Instrument", "Notes"]
+            )
 
         return {
             "settings": settings,
@@ -440,7 +502,7 @@ def sync_illiquid_assets(user_id, df):
             if payload:
                 supabase.table("illiquid_assets").insert(payload).execute()
     except Exception as e:
-        st.error(f"Illiquid Assets Sync Error: {e}")
+        st.warning(f"Illiquid assets table unavailable; skipped sync. ({e})")
 
 def sync_credit_cards(user_id, df):
     """Sync credit cards table for user."""
@@ -464,10 +526,10 @@ def sync_credit_cards(user_id, df):
             if payload:
                 supabase.table("credit_cards").insert(payload).execute()
     except Exception as e:
-        st.error(f"Credit Cards Sync Error: {e}")
+        st.warning(f"Credit cards table unavailable; skipped sync. ({e})")
 
 def upsert_user_profile(user_id, profile: dict):
-    """Insert/update user profile row."""
+    """Insert/update user profile row. Returns True on success, else False."""
     payload = {
         "user_id": user_id,
         "age": int(profile.get("age", 0)),
@@ -477,18 +539,32 @@ def upsert_user_profile(user_id, profile: dict):
         "tax_bracket": int(profile.get("tax_bracket", 30)),
         "tax_regime": profile.get("tax_regime", "new"),
     }
-    supabase.table("user_profile").upsert(payload, on_conflict="user_id").execute()
+    try:
+        supabase.table("user_profile").upsert(payload, on_conflict="user_id").execute()
+        return True
+    except Exception as e:
+        # Keep app usable even if Phase-2 table migration is pending.
+        st.warning(f"User profile table unavailable; profile saved only for this session. ({e})")
+        st.caption(
+            "Fix: open Supabase → SQL → run `supabase/migrations/001_wealthos_phase_tables.sql`, "
+            "then refresh this app (PostgREST picks up new tables automatically)."
+        )
+        return False
 
 def load_tax_investments(user_id, financial_year):
     """Load tax investments for a financial year."""
-    res = (
-        supabase.table("tax_investments")
-        .select("*")
-        .eq("user_id", user_id)
-        .eq("financial_year", financial_year)
-        .execute()
-    )
-    df = ensure_dataframe_schema(res.data, ["instrument_type", "amount_invested", "notes"])
+    try:
+        res = (
+            supabase.table("tax_investments")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("financial_year", financial_year)
+            .execute()
+        )
+        source_rows = res.data
+    except Exception:
+        source_rows = []
+    df = ensure_dataframe_schema(source_rows, ["instrument_type", "amount_invested", "notes"])
     return df.rename(
         columns={
             "instrument_type": "Instrument Type",
@@ -516,7 +592,7 @@ def sync_tax_investments(user_id, financial_year, df):
             if payload:
                 supabase.table("tax_investments").insert(payload).execute()
     except Exception as e:
-        st.error(f"Tax Investments Sync Error: {e}")
+        st.warning(f"Tax Investments table unavailable; skipped sync. ({e})")
 
 def sync_capital_gains(user_id, df):
     """Replace all capital gains positions for user."""
@@ -543,7 +619,7 @@ def sync_capital_gains(user_id, df):
             if payload:
                 supabase.table("capital_gains").insert(payload).execute()
     except Exception as e:
-        st.error(f"Capital Gains Sync Error: {e}")
+        st.warning(f"Capital gains table unavailable; skipped sync. ({e})")
 
 def sync_insurance_policies(user_id, df):
     """Replace insurance inventory for user."""
@@ -572,7 +648,7 @@ def sync_insurance_policies(user_id, df):
             if payload:
                 supabase.table("insurance_policies").insert(payload).execute()
     except Exception as e:
-        st.error(f"Insurance Policies Sync Error: {e}")
+        st.warning(f"Insurance policies table unavailable; skipped sync. ({e})")
 
 def upsert_emergency_fund(user_id, ef: dict):
     payload = {
@@ -581,7 +657,10 @@ def upsert_emergency_fund(user_id, ef: dict):
         "current_amount": float(ef.get("Current Amount", 0.0)),
         "account_name": str(ef.get("Account Name", "")),
     }
-    supabase.table("emergency_fund").upsert(payload, on_conflict="user_id").execute()
+    try:
+        supabase.table("emergency_fund").upsert(payload, on_conflict="user_id").execute()
+    except Exception as e:
+        st.warning(f"Emergency fund table unavailable; skipped save. ({e})")
 
 def sync_goals(user_id, df):
     """Replace goal list for user."""
@@ -608,7 +687,7 @@ def sync_goals(user_id, df):
             if payload:
                 supabase.table("goals").insert(payload).execute()
     except Exception as e:
-        st.error(f"Goals Sync Error: {e}")
+        st.warning(f"Goals table unavailable; skipped sync. ({e})")
 
 def add_expense(user_id, date, desc, amount, category):
     payload = {

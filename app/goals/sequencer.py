@@ -17,7 +17,10 @@ def _safe_float(val, default=0.0):
 
 
 def fetch_ef(user_id, supabase) -> dict:
-    res = supabase.table("emergency_fund").select("*").eq("user_id", user_id).limit(1).execute()
+    try:
+        res = supabase.table("emergency_fund").select("*").eq("user_id", user_id).limit(1).execute()
+    except Exception:
+        return {"target_months": 6, "current_amount": 0.0, "account_name": ""}
     if not res.data:
         return {"target_months": 6, "current_amount": 0.0, "account_name": ""}
     row = res.data[0]
@@ -30,7 +33,10 @@ def fetch_ef(user_id, supabase) -> dict:
 
 def get_monthly_burn(user_id, supabase) -> float:
     monthly_floor = 0.0
-    fixed_rows = supabase.table("fixed_costs").select("*").eq("user_id", user_id).execute().data or []
+    try:
+        fixed_rows = supabase.table("fixed_costs").select("*").eq("user_id", user_id).execute().data or []
+    except Exception:
+        fixed_rows = []
     for row in fixed_rows:
         freq = str(row.get("frequency", "Monthly"))
         amount = _safe_float(row.get("amount"), 0.0)
@@ -43,10 +49,16 @@ def get_monthly_burn(user_id, supabase) -> float:
         elif freq == "Yearly":
             monthly_floor += amount / 12
 
-    obligations = supabase.table("obligations").select("*").eq("user_id", user_id).execute().data or []
+    try:
+        obligations = supabase.table("obligations").select("*").eq("user_id", user_id).execute().data or []
+    except Exception:
+        obligations = []
     monthly_emi = sum(_safe_float(r.get("monthly_emi"), 0.0) for r in obligations)
 
-    expenses = supabase.table("expenses").select("*").eq("user_id", user_id).execute().data or []
+    try:
+        expenses = supabase.table("expenses").select("*").eq("user_id", user_id).execute().data or []
+    except Exception:
+        expenses = []
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=30)
     variable = 0.0
@@ -84,18 +96,24 @@ def get_ef_status(user_id, supabase) -> dict:
 
 
 def get_active_goals(user_id, supabase):
-    res = (
-        supabase.table("goals")
-        .select("*")
-        .eq("user_id", user_id)
-        .order("priority")
-        .execute()
-    )
-    return res.data or []
+    try:
+        res = (
+            supabase.table("goals")
+            .select("*")
+            .eq("user_id", user_id)
+            .order("priority")
+            .execute()
+        )
+        return res.data or []
+    except Exception:
+        return []
 
 
 def get_high_apr_balance(user_id, supabase) -> float:
-    obligations = supabase.table("obligations").select("*").eq("user_id", user_id).execute().data or []
+    try:
+        obligations = supabase.table("obligations").select("*").eq("user_id", user_id).execute().data or []
+    except Exception:
+        obligations = []
     high_apr = 0.0
     for row in obligations:
         rate = _safe_float(row.get("interest_rate"), 0.0)

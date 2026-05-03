@@ -13,16 +13,22 @@ def _safe_float(value):
 
 
 def _active_policies(user_id, supabase):
-    res = supabase.table("insurance_policies").select("*").eq("user_id", user_id).eq("is_active", True).execute()
-    return res.data or []
+    try:
+        res = supabase.table("insurance_policies").select("*").eq("user_id", user_id).eq("is_active", True).execute()
+        return res.data or []
+    except Exception:
+        return []
 
 
 def audit_life_cover(user_id, supabase) -> dict:
     policies = _active_policies(user_id, supabase)
-    profile_res = supabase.table("user_profile").select("monthly_income").eq("user_id", user_id).limit(1).execute()
     monthly_income = 0.0
-    if profile_res.data:
-        monthly_income = _safe_float(profile_res.data[0].get("monthly_income"))
+    try:
+        profile_res = supabase.table("user_profile").select("monthly_income").eq("user_id", user_id).limit(1).execute()
+        if profile_res.data:
+            monthly_income = _safe_float(profile_res.data[0].get("monthly_income"))
+    except Exception:
+        monthly_income = 0.0
 
     recommended = monthly_income * 12 * 10  # 10x annual income
     actual = sum(_safe_float(p.get("sum_assured")) for p in policies if p.get("policy_type") == "term_life")
