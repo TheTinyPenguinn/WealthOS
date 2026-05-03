@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "[1/9] Syntax compile checks"
+echo "[1/10] Syntax compile checks"
 PYTHONPYCACHEPREFIX="$ROOT_DIR/.pycache_tmp" python3 - <<'PY'
 import py_compile
 
@@ -22,6 +22,7 @@ files = [
     "app/tax/ca_export.py",
     "app/tax/capital_gains.py",
     "app/insurance/audit.py",
+    "app/goals/sequencer.py",
     "scripts/run.py",
 ]
 for f in files:
@@ -29,7 +30,7 @@ for f in files:
 print("PASS: syntax compilation")
 PY
 
-echo "[2/9] LLM client modular tests"
+echo "[2/10] LLM client modular tests"
 python3 - <<'PY'
 import os
 import importlib.util
@@ -50,7 +51,7 @@ assert mod._resolve_api_key("gemini", "manual-key") == "manual-key"
 print("PASS: llm_client behavior")
 PY
 
-echo "[3/9] AMFI + FX provider cache tests"
+echo "[3/10] AMFI + FX provider cache tests"
 python3 - <<'PY'
 import io
 import json
@@ -174,7 +175,7 @@ finally:
 print("PASS: amfi/fx caching and conversion")
 PY
 
-echo "[4/9] Phase wiring contract checks"
+echo "[4/10] Phase wiring contract checks"
 python3 - <<'PY'
 from pathlib import Path
 
@@ -198,6 +199,9 @@ assert "Capital Gains" in app_text
 assert "tab6" in app_text
 assert "Insurance" in app_text
 assert "detect_endowment_traps" in app_text
+assert "tab7" in app_text
+assert "allocate_surplus" in app_text
+assert "get_ef_status" in app_text
 
 # Ensure no direct model SDK usage in app.py.
 for forbidden in ("google.generativeai", "GenerativeModel("):
@@ -215,6 +219,8 @@ for required in (
     "sync_tax_investments",
     "sync_capital_gains",
     "sync_insurance_policies",
+    "upsert_emergency_fund",
+    "sync_goals",
 ):
     assert required in db_text, f"Missing db support: {required}"
 
@@ -233,7 +239,7 @@ for key in (
 print("PASS: phase contract wiring")
 PY
 
-echo "[5/9] OCR parser + privacy tests"
+echo "[5/10] OCR parser + privacy tests"
 python3 - <<'PY'
 import sys
 sys.path.insert(0, ".")
@@ -306,7 +312,7 @@ finally:
 print("PASS: OCR parser privacy + zero-retention flow")
 PY
 
-echo "[6/9] Tax module tests"
+echo "[6/10] Tax module tests"
 python3 - <<'PY'
 from app.tax.deductions import get_deductions_summary
 from app.tax.regime_compare import calc_tax, compare_regimes
@@ -371,7 +377,7 @@ assert isinstance(pdf, (bytes, bytearray)) and len(pdf) > 100
 print("PASS: tax modules")
 PY
 
-echo "[7/9] Capital gains module tests"
+echo "[7/10] Capital gains module tests"
 python3 - <<'PY'
 import app.tax.capital_gains as cg
 
@@ -420,7 +426,7 @@ finally:
 print("PASS: capital gains module")
 PY
 
-echo "[8/9] Insurance audit module tests"
+echo "[8/10] Insurance audit module tests"
 python3 - <<'PY'
 from app.insurance.audit import audit_life_cover, audit_health_cover, detect_endowment_traps
 
@@ -489,7 +495,63 @@ assert traps and traps[0]["policy_name"] == "ULIP X"
 print("PASS: insurance audit module")
 PY
 
-echo "[9/9] Quick streamlit route check (already-running app preferred)"
+echo "[9/10] Goals sequencer tests"
+python3 - <<'PY'
+from app.goals.sequencer import get_ef_status, allocate_surplus
+
+class Result:
+    def __init__(self, data):
+        self.data = data
+
+class Query:
+    def __init__(self, table, rows):
+        self.table = table
+        self.rows = rows
+        self.filters = {}
+        self._limit = None
+        self._order_key = None
+    def select(self, *_): return self
+    def eq(self, key, val): self.filters[key] = val; return self
+    def limit(self, n): self._limit = n; return self
+    def order(self, key): self._order_key = key; return self
+    def execute(self):
+        data = [r for r in self.rows if all(r.get(k) == v for k, v in self.filters.items())]
+        if self._order_key:
+            data = sorted(data, key=lambda x: x.get(self._order_key, 999))
+        if self._limit is not None:
+            data = data[: self._limit]
+        return Result(data)
+
+class SupabaseStub:
+    def __init__(self):
+        self.tables = {
+            "emergency_fund": [{"user_id": "u1", "target_months": 6, "current_amount": 50000, "account_name": "EF"}],
+            "fixed_costs": [{"user_id": "u1", "frequency": "Monthly", "amount": 30000}],
+            "obligations": [{"user_id": "u1", "monthly_emi": 10000, "interest_rate": 14, "current_balance": 80000}],
+            "expenses": [{"user_id": "u1", "date": "2026-05-01T00:00:00+00:00", "amount": -10000, "category": "Needs"}],
+            "goals": [
+                {"user_id": "u1", "name": "House", "target_amount": 1000000, "current_amount": 100000, "target_date": "2028-05-01", "priority": 1, "recommended_instrument": "Debt+Equity"},
+                {"user_id": "u1", "name": "Travel", "target_amount": 200000, "current_amount": 50000, "target_date": "2027-05-01", "priority": 2, "recommended_instrument": "Liquid fund"},
+            ],
+        }
+    def table(self, name):
+        return Query(name, self.tables.get(name, []))
+
+sb = SupabaseStub()
+ef = get_ef_status("u1", sb)
+assert ef["status"] == "building"
+alloc_locked = allocate_surplus("u1", 20000, sb)
+assert alloc_locked and "LOCKED" in alloc_locked[0]["label"]
+
+sb.tables["emergency_fund"][0]["current_amount"] = 250000
+ef2 = get_ef_status("u1", sb)
+assert ef2["status"] in {"adequate", "strong"}
+alloc = allocate_surplus("u1", 50000, sb)
+assert isinstance(alloc, list) and len(alloc) > 0
+print("PASS: goals sequencer")
+PY
+
+echo "[10/10] Quick streamlit route check (already-running app preferred)"
 if command -v curl >/dev/null 2>&1; then
   if curl -sS -o /tmp/wealthos_health.html -w "%{http_code}" "http://127.0.0.1:8514" | grep -q "200"; then
     echo "PASS: streamlit reachable at http://127.0.0.1:8514"

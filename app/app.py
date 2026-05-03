@@ -22,6 +22,7 @@ from app.tax.regime_compare import compare_regimes
 from app.tax.ca_export import generate_ca_export_pdf
 from app.tax.capital_gains import get_gains_summary, get_unrealised, get_harvesting_alerts
 from app.insurance.audit import audit_life_cover, audit_health_cover, detect_endowment_traps
+from app.goals.sequencer import get_ef_status, allocate_surplus
 
 # Fix SSL certificate issues for yfinance on Mac
 os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -109,6 +110,8 @@ def save_all_data_callback():
         db.sync_credit_cards(user_id, st.session_state.credit_cards)
         db.sync_capital_gains(user_id, st.session_state.capital_gains)
         db.sync_insurance_policies(user_id, st.session_state.insurance_policies)
+        db.upsert_emergency_fund(user_id, st.session_state.emergency_fund)
+        db.sync_goals(user_id, st.session_state.goals)
         st.toast("✅ Data synced to cloud", icon="☁️")
     except Exception as e:
         st.error(f"Error syncing data: {e}")
@@ -184,6 +187,10 @@ if not st.session_state.data_loaded:
             st.session_state.user_profile = data["user_profile"] or {}
             st.session_state.capital_gains = data.get("capital_gains", pd.DataFrame())
             st.session_state.insurance_policies = data.get("insurance_policies", pd.DataFrame())
+            st.session_state.emergency_fund = data.get(
+                "emergency_fund", {"Target Months": 6, "Current Amount": 0.0, "Account Name": ""}
+            )
+            st.session_state.goals = data.get("goals", pd.DataFrame())
             
             settings = data["settings"]
             st.session_state.salary = settings.get("salary", 0.0)
@@ -1116,6 +1123,22 @@ if 'insurance_policies' not in st.session_state:
     st.session_state.insurance_policies = pd.DataFrame(
         columns=["Policy Name", "Policy Type", "Insurer", "Annual Premium", "Sum Assured", "Maturity Value", "Start Date", "Maturity Date", "Is Active", "Notes"]
     )
+if 'emergency_fund' not in st.session_state:
+    st.session_state.emergency_fund = {"Target Months": 6, "Current Amount": 0.0, "Account Name": ""}
+if 'goals' not in st.session_state:
+    st.session_state.goals = pd.DataFrame(
+        columns=[
+            "Name",
+            "Goal Type",
+            "Target Amount",
+            "Target Date",
+            "Current Amount",
+            "Priority",
+            "Ring Fenced",
+            "Recommended Instrument",
+            "Notes",
+        ]
+    )
 
 if 'illiquid_assets' not in st.session_state:
     st.session_state.illiquid_assets = pd.DataFrame(
@@ -1420,7 +1443,7 @@ st.sidebar.caption("☁️ WealthOS Cloud Connection Active")
 # --- MAIN PAGE - TABBED LAYOUT ---
 st.title("WealthOS v5")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 Investments", "🤖 AI Brain", "🧾 Tax", "🛡️ Insurance"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 Investments", "🤖 AI Brain", "🧾 Tax", "🛡️ Insurance", "🎯 Goals"])
 
 # ============================================================================
 # TAB 1: DASHBOARD (Upgraded with Visuals)
@@ -1464,6 +1487,14 @@ with tab1:
     with col4:
         freedom_rate = surplus / 160 if (surplus > 0 and salary > 0) else 0
         st.metric("Freedom Rate", f"₹{freedom_rate:,.0f}/hr", help="Real Hourly Savings Rate")
+
+    ef_status_dash = get_ef_status(st.session_state.user.id, db.supabase)
+    if ef_status_dash["status"] == "building":
+        st.error(f"EF Status: BUILDING ({ef_status_dash['months_covered']:.1f} months covered)")
+    elif ef_status_dash["status"] == "adequate":
+        st.warning(f"EF Status: ADEQUATE ({ef_status_dash['months_covered']:.1f} months covered)")
+    else:
+        st.success(f"EF Status: STRONG ({ef_status_dash['months_covered']:.1f} months covered)")
     
     # --- QUICK ADD TRANSACTION (MOBILE UX) ---
     with st.expander("➕ Quick Add Transaction", expanded=False):
@@ -2513,6 +2544,111 @@ with tab6:
             st.success("No obvious endowment/ULIP trap found in active policies.")
 
         st.caption("Discuss surrender with a SEBI-registered advisor.")
+
+# ============================================================================
+# TAB 7: GOALS + EF
+# ============================================================================
+
+with tab7:
+    st.header("🎯 Goals + Emergency Fund")
+
+    ef_status = get_ef_status(st.session_state.user.id, db.supabase)
+    ef_col1, ef_col2, ef_col3 = st.columns(3)
+    with ef_col1:
+        st.metric("EF Target", f"₹{ef_status['target']:,.0f}")
+    with ef_col2:
+        st.metric("EF Current", f"₹{ef_status['current']:,.0f}")
+    with ef_col3:
+        st.metric("Months Covered", f"{ef_status['months_covered']:.1f}")
+
+    if ef_status["status"] == "building":
+        st.error("BUILDING", icon="🔴")
+    elif ef_status["status"] == "adequate":
+        st.warning("ADEQUATE", icon="🟠")
+    else:
+        st.success("STRONG", icon="🟢")
+
+    with st.expander("Emergency Fund Setup", expanded=False):
+        with st.form("ef_setup_form"):
+            ef_target_months = st.number_input(
+                "Target Months",
+                min_value=1,
+                max_value=24,
+                value=int(st.session_state.emergency_fund.get("Target Months", 6)),
+            )
+            ef_current_amount = st.number_input(
+                "Current Amount (₹)",
+                min_value=0.0,
+                value=float(st.session_state.emergency_fund.get("Current Amount", 0.0)),
+                format="%.2f",
+            )
+            ef_account_name = st.text_input(
+                "Account Name",
+                value=str(st.session_state.emergency_fund.get("Account Name", "")),
+            )
+            if st.form_submit_button("Save Emergency Fund", use_container_width=True):
+                st.session_state.emergency_fund = {
+                    "Target Months": ef_target_months,
+                    "Current Amount": ef_current_amount,
+                    "Account Name": ef_account_name,
+                }
+                db.upsert_emergency_fund(st.session_state.user.id, st.session_state.emergency_fund)
+                st.success("Emergency fund settings saved.")
+                st.rerun()
+
+    st.subheader("Goals")
+    edited_goals = st.data_editor(
+        st.session_state.goals,
+        use_container_width=True,
+        num_rows="dynamic",
+        column_config={
+            "Name": st.column_config.TextColumn("Name", required=True),
+            "Goal Type": st.column_config.SelectboxColumn(
+                "Goal Type",
+                options=[
+                    "emergency_fund",
+                    "debt_payoff",
+                    "house",
+                    "education",
+                    "retirement",
+                    "vehicle",
+                    "parents_corpus",
+                    "travel",
+                    "other",
+                ],
+                required=True,
+            ),
+            "Target Amount": st.column_config.NumberColumn("Target Amount (₹)", format="₹%.2f", min_value=0.0),
+            "Target Date": st.column_config.DateColumn("Target Date", format="YYYY-MM-DD"),
+            "Current Amount": st.column_config.NumberColumn("Current Amount (₹)", format="₹%.2f", min_value=0.0),
+            "Priority": st.column_config.NumberColumn("Priority (1=highest)", min_value=1, max_value=10, step=1),
+            "Ring Fenced": st.column_config.CheckboxColumn("Ring-Fenced"),
+            "Recommended Instrument": st.column_config.TextColumn("Recommended Instrument"),
+            "Notes": st.column_config.TextColumn("Notes"),
+        },
+        hide_index=True,
+        key="goals_editor",
+    )
+    # Reorderable behavior via priority column edits.
+    if not edited_goals.empty:
+        edited_goals = edited_goals.sort_values("Priority", ascending=True).reset_index(drop=True)
+    st.session_state.goals = edited_goals
+
+    if st.button("Save Goals", type="primary", use_container_width=True, key="save_goals"):
+        db.sync_goals(st.session_state.user.id, st.session_state.goals)
+        st.success("Goals saved.")
+        st.rerun()
+
+    st.subheader("This Month Surplus Plan")
+    salary = safe_float(st.session_state.get("salary", 0.0))
+    _, _, _, _, true_burn, _, surplus, _, _, _, _, _, _, _, _ = calculate_metrics(
+        st.session_state.expenses,
+        st.session_state.investments,
+        st.session_state.accounts,
+    )
+    st.caption(f"Monthly surplus used for planning: ₹{surplus:,.0f}")
+    plan = allocate_surplus(st.session_state.user.id, surplus, db.supabase)
+    st.dataframe(pd.DataFrame(plan), use_container_width=True, hide_index=True)
 
 
 # ============================================================================
