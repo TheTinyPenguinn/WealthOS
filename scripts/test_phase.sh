@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "[1/6] Syntax compile checks"
+echo "[1/7] Syntax compile checks"
 PYTHONPYCACHEPREFIX="$ROOT_DIR/.pycache_tmp" python3 - <<'PY'
 import py_compile
 
@@ -17,6 +17,9 @@ files = [
     "app/utils/llm_client.py",
     "app/utils/privacy.py",
     "app/ingestion/ocr_parser.py",
+    "app/tax/deductions.py",
+    "app/tax/regime_compare.py",
+    "app/tax/ca_export.py",
     "scripts/run.py",
 ]
 for f in files:
@@ -24,7 +27,7 @@ for f in files:
 print("PASS: syntax compilation")
 PY
 
-echo "[2/6] LLM client modular tests"
+echo "[2/7] LLM client modular tests"
 python3 - <<'PY'
 import os
 import importlib.util
@@ -45,7 +48,7 @@ assert mod._resolve_api_key("gemini", "manual-key") == "manual-key"
 print("PASS: llm_client behavior")
 PY
 
-echo "[3/6] AMFI + FX provider cache tests"
+echo "[3/7] AMFI + FX provider cache tests"
 python3 - <<'PY'
 import io
 import json
@@ -169,7 +172,7 @@ finally:
 print("PASS: amfi/fx caching and conversion")
 PY
 
-echo "[4/6] Phase wiring contract checks"
+echo "[4/7] Phase wiring contract checks"
 python3 - <<'PY'
 from pathlib import Path
 
@@ -184,6 +187,10 @@ assert "system_prompt=risk_system_prompt" in app_text
 assert "plot_runway_impact(liquid_net_worth" in app_text
 assert "st.session_state.illiquid_assets" in app_text
 assert "st.session_state.credit_cards" in app_text
+assert "with tab5:" in app_text
+assert "get_deductions_summary" in app_text
+assert "compare_regimes" in app_text
+assert "generate_ca_export_pdf" in app_text
 
 # Ensure no direct model SDK usage in app.py.
 for forbidden in ("google.generativeai", "GenerativeModel("):
@@ -197,6 +204,8 @@ for required in (
     "illiquid_assets",
     "credit_cards",
     "user_profile",
+    "load_tax_investments",
+    "sync_tax_investments",
 ):
     assert required in db_text, f"Missing db support: {required}"
 
@@ -215,7 +224,7 @@ for key in (
 print("PASS: phase contract wiring")
 PY
 
-echo "[5/6] OCR parser + privacy tests"
+echo "[5/7] OCR parser + privacy tests"
 python3 - <<'PY'
 import sys
 sys.path.insert(0, ".")
@@ -288,7 +297,66 @@ finally:
 print("PASS: OCR parser privacy + zero-retention flow")
 PY
 
-echo "[6/6] Quick streamlit route check (already-running app preferred)"
+echo "[6/7] Tax module tests"
+python3 - <<'PY'
+from app.tax.deductions import get_deductions_summary
+from app.tax.regime_compare import calc_tax, compare_regimes
+from app.tax.ca_export import generate_ca_export_pdf
+
+class Result:
+    def __init__(self, data):
+        self.data = data
+
+class Query:
+    def __init__(self, rows):
+        self.rows = rows
+        self.filters = {}
+    def select(self, *_):
+        return self
+    def eq(self, key, val):
+        self.filters[key] = val
+        return self
+    def execute(self):
+        data = [r for r in self.rows if all(r.get(k) == v for k, v in self.filters.items())]
+        return Result(data)
+
+class SupabaseStub:
+    def __init__(self):
+        self.tax_rows = [
+            {"user_id": "u1", "financial_year": "2025-2026", "instrument_type": "epf", "amount_invested": 100000},
+            {"user_id": "u1", "financial_year": "2025-2026", "instrument_type": "nps_80ccd1b", "amount_invested": 20000},
+            {"user_id": "u1", "financial_year": "2025-2026", "instrument_type": "health_insurance_self", "amount_invested": 15000},
+        ]
+    def table(self, name):
+        assert name == "tax_investments"
+        return Query(self.tax_rows)
+
+sb = SupabaseStub()
+summary = get_deductions_summary("u1", "2025-2026", sb)
+assert summary["s80c"]["invested"] == 100000
+assert summary["s_nps"]["invested"] == 20000
+assert summary["s80d"]["self"] == 15000
+assert summary["s80c"]["gap"] == 50000
+
+assert round(calc_tax(500000, [(250000, 0), (500000, 0.05), (float("inf"), 0.30)]), 2) == 13000.0
+cmp = compare_regimes(1500000, {"s80c_invested": 150000, "s_nps_invested": 50000, "s80d_total": 25000})
+assert cmp["recommended"] in {"old", "new"}
+assert cmp["saving"] >= 0
+
+pdf = generate_ca_export_pdf(
+    fy="2025-2026",
+    user="user@example.com",
+    deductions_df=__import__("pandas").DataFrame(
+        [{"Instrument Type": "epf", "Amount Invested": 100000, "Notes": ""}]
+    ),
+    summary=summary,
+    regime_result=cmp,
+)
+assert isinstance(pdf, (bytes, bytearray)) and len(pdf) > 100
+print("PASS: tax modules")
+PY
+
+echo "[7/7] Quick streamlit route check (already-running app preferred)"
 if command -v curl >/dev/null 2>&1; then
   if curl -sS -o /tmp/wealthos_health.html -w "%{http_code}" "http://127.0.0.1:8514" | grep -q "200"; then
     echo "PASS: streamlit reachable at http://127.0.0.1:8514"
