@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "[1/5] Syntax compile checks"
+echo "[1/6] Syntax compile checks"
 PYTHONPYCACHEPREFIX="$ROOT_DIR/.pycache_tmp" python3 - <<'PY'
 import py_compile
 
@@ -15,6 +15,8 @@ files = [
     "app/data_providers/amfi.py",
     "app/data_providers/fx.py",
     "app/utils/llm_client.py",
+    "app/utils/privacy.py",
+    "app/ingestion/ocr_parser.py",
     "scripts/run.py",
 ]
 for f in files:
@@ -22,7 +24,7 @@ for f in files:
 print("PASS: syntax compilation")
 PY
 
-echo "[2/5] LLM client modular tests"
+echo "[2/6] LLM client modular tests"
 python3 - <<'PY'
 import os
 import importlib.util
@@ -43,7 +45,7 @@ assert mod._resolve_api_key("gemini", "manual-key") == "manual-key"
 print("PASS: llm_client behavior")
 PY
 
-echo "[3/5] AMFI + FX provider cache tests"
+echo "[3/6] AMFI + FX provider cache tests"
 python3 - <<'PY'
 import io
 import json
@@ -167,7 +169,7 @@ finally:
 print("PASS: amfi/fx caching and conversion")
 PY
 
-echo "[4/5] Phase wiring contract checks"
+echo "[4/6] Phase wiring contract checks"
 python3 - <<'PY'
 from pathlib import Path
 
@@ -213,7 +215,80 @@ for key in (
 print("PASS: phase contract wiring")
 PY
 
-echo "[5/5] Quick streamlit route check (already-running app preferred)"
+echo "[5/6] OCR parser + privacy tests"
+python3 - <<'PY'
+import sys
+sys.path.insert(0, ".")
+
+from app.ingestion import ocr_parser
+
+calls = {
+    "uploaded": [],
+    "removed": [],
+    "inserted": [],
+    "vision_prompt": "",
+}
+
+def fake_sanitise(text):
+    return "SANITISED"
+
+def fake_call_vision(prompt, image_bytes, **kwargs):
+    calls["vision_prompt"] = prompt
+    assert kwargs.get("provider") == "openai"
+    return '[{"merchant":"Cafe","amount":150.0,"date":"2026-01-02","currency":"INR","category":"food"}]'
+
+class StorageBucket:
+    def upload(self, path, data):
+        calls["uploaded"].append(path)
+    def remove(self, paths):
+        calls["removed"].extend(paths)
+
+class StorageAPI:
+    def from_(self, _bucket):
+        return StorageBucket()
+
+class TableAPI:
+    def insert(self, rows):
+        calls["inserted"].extend(rows if isinstance(rows, list) else [rows])
+        return self
+    def execute(self):
+        return None
+
+class SupabaseStub:
+    def __init__(self):
+        self.storage = StorageAPI()
+    def table(self, _name):
+        return TableAPI()
+
+sb = SupabaseStub()
+
+orig_sanitise = ocr_parser.sanitise_for_ai
+orig_call_vision = ocr_parser.call_vision
+ocr_parser.sanitise_for_ai = fake_sanitise
+ocr_parser.call_vision = fake_call_vision
+try:
+    parsed = ocr_parser.parse_file(
+        file_bytes=b"txn 9876543210 ABCDE1234F",
+        mime_type="image/jpeg",
+        user_id="u1",
+        supabase=sb,
+    )
+    assert len(parsed) == 1
+    assert parsed[0]["merchant"] == "Cafe"
+    assert "SANITISED" in calls["vision_prompt"]
+    assert calls["uploaded"] and calls["removed"], "Storage upload/remove should both happen"
+
+    saved = ocr_parser.confirm_and_save(parsed, "u1", sb)
+    assert saved == 1
+    assert calls["inserted"][0]["source"] == "ocr"
+finally:
+    ocr_parser.sanitise_for_ai = orig_sanitise
+    ocr_parser.call_vision = orig_call_vision
+
+print("PASS: OCR parser privacy + zero-retention flow")
+PY
+
+echo "[6/6] Quick streamlit route check (already-running app preferred)"
 if command -v curl >/dev/null 2>&1; then
   if curl -sS -o /tmp/wealthos_health.html -w "%{http_code}" "http://127.0.0.1:8514" | grep -q "200"; then
     echo "PASS: streamlit reachable at http://127.0.0.1:8514"
