@@ -23,6 +23,7 @@ from app.tax.ca_export import generate_ca_export_pdf
 from app.tax.capital_gains import get_gains_summary, get_unrealised, get_harvesting_alerts
 from app.insurance.audit import audit_life_cover, audit_health_cover, detect_endowment_traps
 from app.goals.sequencer import get_ef_status, allocate_surplus
+from ai.agent import run_agent
 
 # Fix SSL certificate issues for yfinance on Mac
 os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -2109,7 +2110,7 @@ with tab3:
 
 with tab4:
     st.header("🤖 WealthOS Consultant")
-    st.caption("Powered by Google Gemini")
+    st.caption("Powered by WealthOS Agent")
     
     # --- CONNECTION DOCTOR & SETTINGS ---
     with st.expander("🛠️ AI Settings & Status", expanded=False):
@@ -2165,38 +2166,19 @@ with tab4:
         st.info("💡 The AI analyzes your Net Worth, Surplus, and Debt Interest. No account numbers are shared.")
         
     if st.button("Analyze Finances", type="primary"):
-        if not st.session_state.api_key:
-            st.error("Please enter your Gemini API Key in the Sidebar.")
+        provider = _get_secret_or_env("LLM_PROVIDER", "gemini").lower() or "gemini"
+        env_key_name = {
+            "gemini": "GEMINI_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+        }.get(provider, "GEMINI_API_KEY")
+        has_key = bool(st.session_state.api_key or _get_secret_or_env(env_key_name))
+        if not has_key:
+            st.error(f"Please provide API key for {provider} ({env_key_name}).")
         else:
             with st.spinner("Thinking..."):
                 try:
-                    # 1. Get Context (Fixed: Pass all required parameters)
-                    financial_context = generate_financial_context(net_worth, liquid_net_worth, total_debt, true_burn, surplus, fixed_living, total_emi, csv_variable_spend, avg_interest)
-                    
-                    # 2. Prompt
-                    full_prompt = f"""
-                    Role: You are a Strategic CFO for a High-Income Earner.
-                    
-                    DATA SUMMARY:
-                    {financial_context}
-                    
-                    USER QUESTION:
-                    {user_query}
-                    
-                    INSTRUCTIONS:
-                    - Focus on 'Surplus Deployment'.
-                    - Compare Investment Returns vs Debt Interest (Avg Rate: {avg_interest:.1f}%).
-                    - Be mathematical and direct.
-                    - Use Markdown.
-                    """
-                    provider = _get_secret_or_env("LLM_PROVIDER", "gemini").lower() or "gemini"
-                    response_text = call_llm(
-                        full_prompt,
-                        system_prompt=risk_system_prompt,
-                        model=st.session_state.selected_model,
-                        api_key=st.session_state.api_key,
-                        provider=provider,
-                    )
+                    response_text = run_agent(user_query, st.session_state.user.id, db.supabase)
                     
                     st.markdown("### 🧠 CFO Analysis")
                     st.markdown(response_text)
