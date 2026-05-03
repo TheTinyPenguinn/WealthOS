@@ -4,6 +4,9 @@ numpy
 plotly
 yfinance
 google-generativeai
+openai
+anthropic
+langfuse
 supabase
 gotrue
 openpyxl

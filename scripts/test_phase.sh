@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "[1/10] Syntax compile checks"
+echo "[1/11] Syntax compile checks"
 PYTHONPYCACHEPREFIX="$ROOT_DIR/.pycache_tmp" python3 - <<'PY'
 import py_compile
 
@@ -23,6 +23,8 @@ files = [
     "app/tax/capital_gains.py",
     "app/insurance/audit.py",
     "app/goals/sequencer.py",
+    "ai/tools.py",
+    "ai/agent.py",
     "scripts/run.py",
 ]
 for f in files:
@@ -30,7 +32,7 @@ for f in files:
 print("PASS: syntax compilation")
 PY
 
-echo "[2/10] LLM client modular tests"
+echo "[2/11] LLM client modular tests"
 python3 - <<'PY'
 import os
 import importlib.util
@@ -48,10 +50,23 @@ assert mod._normalize_provider(None) == "openai"
 assert mod._normalize_provider("bad-provider") == "gemini"
 assert mod._resolve_api_key("openai", None) == "k-openai"
 assert mod._resolve_api_key("gemini", "manual-key") == "manual-key"
+
+orig_call = mod._call_text_llm
+mod._call_text_llm = lambda *a, **k: '{"tool_call":{"name":"noop","arguments":{}}}'
+agent_resp = mod.call_llm(
+    "system",
+    [{"role": "user", "content": "hello"}],
+    [{"name": "noop", "parameters": {"type": "object", "properties": {}, "required": []}}],
+    provider="openai",
+    api_key="k-openai",
+)
+mod._call_text_llm = orig_call
+assert isinstance(agent_resp, dict)
+assert "tool_call" in agent_resp and "text" in agent_resp
 print("PASS: llm_client behavior")
 PY
 
-echo "[3/10] AMFI + FX provider cache tests"
+echo "[3/11] AMFI + FX provider cache tests"
 python3 - <<'PY'
 import io
 import json
@@ -175,7 +190,7 @@ finally:
 print("PASS: amfi/fx caching and conversion")
 PY
 
-echo "[4/10] Phase wiring contract checks"
+echo "[4/11] Phase wiring contract checks"
 python3 - <<'PY'
 from pathlib import Path
 
@@ -186,7 +201,8 @@ env_text = Path(".env.example").read_text(encoding="utf-8")
 # Phase 1+2 contracts in app.
 assert "call_llm(" in app_text
 assert "profile_risk_details" in app_text
-assert "system_prompt=risk_system_prompt" in app_text
+assert "from ai.agent import run_agent" in app_text
+assert "run_agent(user_query, st.session_state.user.id, db.supabase)" in app_text
 assert "plot_runway_impact(liquid_net_worth" in app_text
 assert "st.session_state.illiquid_assets" in app_text
 assert "st.session_state.credit_cards" in app_text
@@ -239,7 +255,7 @@ for key in (
 print("PASS: phase contract wiring")
 PY
 
-echo "[5/10] OCR parser + privacy tests"
+echo "[5/11] OCR parser + privacy tests"
 python3 - <<'PY'
 import sys
 sys.path.insert(0, ".")
@@ -312,7 +328,7 @@ finally:
 print("PASS: OCR parser privacy + zero-retention flow")
 PY
 
-echo "[6/10] Tax module tests"
+echo "[6/11] Tax module tests"
 python3 - <<'PY'
 from app.tax.deductions import get_deductions_summary
 from app.tax.regime_compare import calc_tax, compare_regimes
@@ -377,7 +393,7 @@ assert isinstance(pdf, (bytes, bytearray)) and len(pdf) > 100
 print("PASS: tax modules")
 PY
 
-echo "[7/10] Capital gains module tests"
+echo "[7/11] Capital gains module tests"
 python3 - <<'PY'
 import app.tax.capital_gains as cg
 
@@ -426,7 +442,7 @@ finally:
 print("PASS: capital gains module")
 PY
 
-echo "[8/10] Insurance audit module tests"
+echo "[8/11] Insurance audit module tests"
 python3 - <<'PY'
 from app.insurance.audit import audit_life_cover, audit_health_cover, detect_endowment_traps
 
@@ -495,7 +511,7 @@ assert traps and traps[0]["policy_name"] == "ULIP X"
 print("PASS: insurance audit module")
 PY
 
-echo "[9/10] Goals sequencer tests"
+echo "[9/11] Goals sequencer tests"
 python3 - <<'PY'
 from app.goals.sequencer import get_ef_status, allocate_surplus
 
@@ -551,7 +567,60 @@ assert isinstance(alloc, list) and len(alloc) > 0
 print("PASS: goals sequencer")
 PY
 
-echo "[10/10] Quick streamlit route check (already-running app preferred)"
+echo "[10/11] AI agent tool-dispatch tests"
+python3 - <<'PY'
+import ai.agent as agent
+
+class Result:
+    def __init__(self, data):
+        self.data = data
+
+class Query:
+    def __init__(self, table, rows):
+        self.table = table
+        self.rows = rows
+        self.filters = {}
+        self._limit = None
+    def select(self, *_): return self
+    def eq(self, k, v): self.filters[k] = v; return self
+    def limit(self, n): self._limit = n; return self
+    def execute(self):
+        data = [r for r in self.rows if all(r.get(k) == v for k, v in self.filters.items())]
+        if self._limit is not None:
+            data = data[: self._limit]
+        return Result(data)
+    def insert(self, _payload):
+        return self
+
+class SupabaseStub:
+    def __init__(self):
+        self.tables = {
+            "user_profile": [{"user_id": "u1", "age": 30, "target_retirement_age": 60, "monthly_income": 100000, "tax_regime": "new"}],
+            "user_settings": [{"user_id": "u1", "salary": 100000}],
+            "accounts": [{"user_id": "u1", "type": "Bank/Cash", "balance": 500000}],
+            "investments": [],
+            "obligations": [],
+            "tax_investments": [],
+            "insurance_policies": [],
+            "capital_gains": [],
+            "fixed_costs": [],
+            "expenses": [],
+            "emergency_fund": [{"user_id": "u1", "target_months": 6, "current_amount": 100000, "account_name": "EF"}],
+            "goals": [],
+            "ai_tool_calls": [],
+        }
+    def table(self, name):
+        return Query(name, self.tables.get(name, []))
+
+sb = SupabaseStub()
+snap = agent.dispatch_tool("get_financial_snapshot", {}, "u1", sb)
+assert "liquid_nw" in snap
+audit = agent.dispatch_tool("get_insurance_audit", {}, "u1", sb)
+assert "life" in audit and "health" in audit
+print("PASS: agent dispatch")
+PY
+
+echo "[11/11] Quick streamlit route check (already-running app preferred)"
 if command -v curl >/dev/null 2>&1; then
   if curl -sS -o /tmp/wealthos_health.html -w "%{http_code}" "http://127.0.0.1:8514" | grep -q "200"; then
     echo "PASS: streamlit reachable at http://127.0.0.1:8514"
