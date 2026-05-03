@@ -13,6 +13,14 @@ import time
 def _get_secret_or_env(key: str) -> str:
     return str(st.secrets.get(key, os.getenv(key, ""))).strip()
 
+def _safe_int(value, default=1):
+    try:
+        if value is None or pd.isna(value):
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
 # Initialize Supabase client
 @st.cache_resource
 def get_supabase_client():
@@ -131,13 +139,62 @@ def load_all_data(user_id):
         if not expenses.empty:
             expenses["Date"] = pd.to_datetime(expenses["Date"]).dt.tz_localize(None)
 
+        # Load Illiquid Assets
+        illiquid_res = supabase.table("illiquid_assets").select("*").eq("user_id", user_id).execute()
+        illiquid_assets = ensure_dataframe_schema(
+            illiquid_res.data,
+            ["asset_type", "name", "estimated_value", "loan_outstanding", "notes"],
+        )
+        illiquid_assets = illiquid_assets.rename(
+            columns={
+                "asset_type": "Asset Type",
+                "name": "Name",
+                "estimated_value": "Estimated Value",
+                "loan_outstanding": "Loan Outstanding",
+                "notes": "Notes",
+            }
+        )
+
+        # Load Credit Cards
+        cards_res = supabase.table("credit_cards").select("*").eq("user_id", user_id).execute()
+        credit_cards = ensure_dataframe_schema(
+            cards_res.data,
+            [
+                "card_name",
+                "credit_limit",
+                "current_outstanding",
+                "billing_date",
+                "payment_due_date",
+                "apr_percent",
+                "min_due_amount",
+            ],
+        )
+        credit_cards = credit_cards.rename(
+            columns={
+                "card_name": "Card Name",
+                "credit_limit": "Credit Limit",
+                "current_outstanding": "Current Outstanding",
+                "billing_date": "Billing Date",
+                "payment_due_date": "Payment Due Date",
+                "apr_percent": "APR (%)",
+                "min_due_amount": "Min Due Amount",
+            }
+        )
+
+        # Load User Profile
+        profile_res = supabase.table("user_profile").select("*").eq("user_id", user_id).limit(1).execute()
+        user_profile = profile_res.data[0] if profile_res.data else {}
+
         return {
             "settings": settings,
             "accounts": accounts,
             "fixed_costs": fixed_costs,
             "obligations": obligations,
             "investments": investments,
-            "expenses": expenses
+            "expenses": expenses,
+            "illiquid_assets": illiquid_assets,
+            "credit_cards": credit_cards,
+            "user_profile": user_profile,
         }
     except Exception as e:
         st.error(f"Error loading database: {e}")
@@ -248,6 +305,65 @@ def sync_settings(user_id, salary, api_key, model):
         "selected_model": model
     }
     supabase.table("user_settings").upsert(payload, on_conflict="user_id").execute()
+
+def sync_illiquid_assets(user_id, df):
+    """Sync illiquid assets table for user."""
+    try:
+        supabase.table("illiquid_assets").delete().eq("user_id", user_id).execute()
+        if df is not None and not df.empty:
+            payload = []
+            for _, row in df.iterrows():
+                payload.append(
+                    {
+                        "user_id": user_id,
+                        "asset_type": str(row.get("Asset Type", "other")),
+                        "name": str(row.get("Name", "Unnamed Asset")),
+                        "estimated_value": float(row.get("Estimated Value", 0.0)),
+                        "loan_outstanding": float(row.get("Loan Outstanding", 0.0)),
+                        "notes": str(row.get("Notes", "")),
+                    }
+                )
+            if payload:
+                supabase.table("illiquid_assets").insert(payload).execute()
+    except Exception as e:
+        st.error(f"Illiquid Assets Sync Error: {e}")
+
+def sync_credit_cards(user_id, df):
+    """Sync credit cards table for user."""
+    try:
+        supabase.table("credit_cards").delete().eq("user_id", user_id).execute()
+        if df is not None and not df.empty:
+            payload = []
+            for _, row in df.iterrows():
+                payload.append(
+                    {
+                        "user_id": user_id,
+                        "card_name": str(row.get("Card Name", "Unnamed Card")),
+                        "credit_limit": float(row.get("Credit Limit", 0.0)),
+                        "current_outstanding": float(row.get("Current Outstanding", 0.0)),
+                        "billing_date": _safe_int(row.get("Billing Date", 1), 1),
+                        "payment_due_date": _safe_int(row.get("Payment Due Date", 1), 1),
+                        "apr_percent": float(row.get("APR (%)", 0.0)),
+                        "min_due_amount": float(row.get("Min Due Amount", 0.0)),
+                    }
+                )
+            if payload:
+                supabase.table("credit_cards").insert(payload).execute()
+    except Exception as e:
+        st.error(f"Credit Cards Sync Error: {e}")
+
+def upsert_user_profile(user_id, profile: dict):
+    """Insert/update user profile row."""
+    payload = {
+        "user_id": user_id,
+        "age": int(profile.get("age", 0)),
+        "target_retirement_age": int(profile.get("target_retirement_age", 60)),
+        "monthly_income": float(profile.get("monthly_income", 0.0)),
+        "income_type": profile.get("income_type", "salaried"),
+        "tax_bracket": int(profile.get("tax_bracket", 30)),
+        "tax_regime": profile.get("tax_regime", "new"),
+    }
+    supabase.table("user_profile").upsert(payload, on_conflict="user_id").execute()
 
 def add_expense(user_id, date, desc, amount, category):
     payload = {
