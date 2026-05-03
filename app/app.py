@@ -21,6 +21,7 @@ from app.tax.deductions import get_deductions_summary, get_80c_alert, current_fi
 from app.tax.regime_compare import compare_regimes
 from app.tax.ca_export import generate_ca_export_pdf
 from app.tax.capital_gains import get_gains_summary, get_unrealised, get_harvesting_alerts
+from app.insurance.audit import audit_life_cover, audit_health_cover, detect_endowment_traps
 
 # Fix SSL certificate issues for yfinance on Mac
 os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -107,6 +108,7 @@ def save_all_data_callback():
         db.sync_illiquid_assets(user_id, st.session_state.illiquid_assets)
         db.sync_credit_cards(user_id, st.session_state.credit_cards)
         db.sync_capital_gains(user_id, st.session_state.capital_gains)
+        db.sync_insurance_policies(user_id, st.session_state.insurance_policies)
         st.toast("✅ Data synced to cloud", icon="☁️")
     except Exception as e:
         st.error(f"Error syncing data: {e}")
@@ -181,6 +183,7 @@ if not st.session_state.data_loaded:
             st.session_state.credit_cards = data["credit_cards"]
             st.session_state.user_profile = data["user_profile"] or {}
             st.session_state.capital_gains = data.get("capital_gains", pd.DataFrame())
+            st.session_state.insurance_policies = data.get("insurance_policies", pd.DataFrame())
             
             settings = data["settings"]
             st.session_state.salary = settings.get("salary", 0.0)
@@ -1109,6 +1112,10 @@ if 'capital_gains' not in st.session_state:
     st.session_state.capital_gains = pd.DataFrame(
         columns=["Asset Name", "Asset Type", "Buy Date", "Buy Price", "Sell Date", "Sell Price", "Units", "Notes"]
     )
+if 'insurance_policies' not in st.session_state:
+    st.session_state.insurance_policies = pd.DataFrame(
+        columns=["Policy Name", "Policy Type", "Insurer", "Annual Premium", "Sum Assured", "Maturity Value", "Start Date", "Maturity Date", "Is Active", "Notes"]
+    )
 
 if 'illiquid_assets' not in st.session_state:
     st.session_state.illiquid_assets = pd.DataFrame(
@@ -1413,7 +1420,7 @@ st.sidebar.caption("☁️ WealthOS Cloud Connection Active")
 # --- MAIN PAGE - TABBED LAYOUT ---
 st.title("WealthOS v5")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 Investments", "🤖 AI Brain", "🧾 Tax"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 Investments", "🤖 AI Brain", "🧾 Tax", "🛡️ Insurance"])
 
 # ============================================================================
 # TAB 1: DASHBOARD (Upgraded with Visuals)
@@ -2377,6 +2384,135 @@ with tab5:
             db.sync_capital_gains(st.session_state.user.id, st.session_state.capital_gains)
             st.success("Capital gains positions saved.")
             st.rerun()
+
+# ============================================================================
+# TAB 6: INSURANCE
+# ============================================================================
+
+with tab6:
+    st.header("🛡️ Insurance")
+    ins_tab1, ins_tab2, ins_tab3 = st.tabs(["Coverage Dashboard", "Policy Inventory", "Endowment Trap Detector"])
+
+    life_audit = audit_life_cover(st.session_state.user.id, db.supabase)
+    health_audit = audit_health_cover(st.session_state.user.id, db.supabase)
+    traps = detect_endowment_traps(st.session_state.user.id, db.supabase)
+
+    with ins_tab1:
+        l_recommended = max(1.0, float(life_audit["recommended"]))
+        l_ratio = float(life_audit["actual"]) / l_recommended
+        h_recommended = max(1.0, float(health_audit["recommended"]))
+        h_ratio = float(health_audit["actual"]) / h_recommended
+
+        st.subheader("Life Cover")
+        st.progress(min(1.0, l_ratio), text=f"₹{life_audit['actual']:,.0f} / ₹{life_audit['recommended']:,.0f}")
+        if l_ratio < 0.8:
+            st.error("Life cover is below 80% of recommended coverage.")
+        else:
+            st.success("Life cover looks adequate.")
+
+        st.subheader("Health Cover")
+        st.progress(min(1.0, h_ratio), text=f"₹{health_audit['actual']:,.0f} / ₹{health_audit['recommended']:,.0f}")
+        if health_audit["adequacy"] == "underinsured":
+            st.error("Health cover is below metro baseline (₹10L).")
+        else:
+            st.success("Health cover baseline achieved.")
+
+    with ins_tab2:
+        st.markdown("#### Policies")
+        inventory_df = st.session_state.insurance_policies.copy()
+        if not inventory_df.empty:
+            st.dataframe(
+                inventory_df[
+                    ["Policy Type", "Insurer", "Annual Premium", "Sum Assured", "Maturity Value", "Maturity Date"]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.markdown("#### Add Policy")
+        with st.form("insurance_add_policy_form", clear_on_submit=True):
+            p_name = st.text_input("Policy Name")
+            p_type = st.selectbox(
+                "Policy Type",
+                options=["term_life", "health", "endowment", "money_back", "ulip", "vehicle", "home", "other"],
+            )
+            p_insurer = st.text_input("Insurer")
+            p_premium = st.number_input("Annual Premium", min_value=0.0, format="%.2f")
+            p_cover = st.number_input("Sum Assured", min_value=0.0, format="%.2f")
+            p_maturity_val = st.number_input("Maturity Value", min_value=0.0, format="%.2f")
+            p_start = st.date_input("Start Date", value=datetime.now().date())
+            p_maturity = st.date_input("Maturity Date", value=datetime.now().date())
+            p_active = st.checkbox("Is Active", value=True)
+            p_notes = st.text_input("Notes")
+            if st.form_submit_button("Add Policy", use_container_width=True):
+                if p_name.strip():
+                    new_policy = pd.DataFrame(
+                        [
+                            {
+                                "Policy Name": p_name.strip(),
+                                "Policy Type": p_type,
+                                "Insurer": p_insurer,
+                                "Annual Premium": float(p_premium),
+                                "Sum Assured": float(p_cover),
+                                "Maturity Value": float(p_maturity_val),
+                                "Start Date": pd.Timestamp(p_start),
+                                "Maturity Date": pd.Timestamp(p_maturity),
+                                "Is Active": bool(p_active),
+                                "Notes": p_notes,
+                            }
+                        ]
+                    )
+                    st.session_state.insurance_policies = pd.concat(
+                        [st.session_state.insurance_policies, new_policy], ignore_index=True
+                    )
+                    st.success("Policy added.")
+                else:
+                    st.warning("Policy name is required.")
+
+        edited_ins = st.data_editor(
+            st.session_state.insurance_policies,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config={
+                "Policy Name": st.column_config.TextColumn("Policy Name", required=True),
+                "Policy Type": st.column_config.SelectboxColumn(
+                    "Policy Type",
+                    options=["term_life", "health", "endowment", "money_back", "ulip", "vehicle", "home", "other"],
+                ),
+                "Insurer": st.column_config.TextColumn("Insurer"),
+                "Annual Premium": st.column_config.NumberColumn("Premium/Yr", format="₹%.2f", min_value=0.0),
+                "Sum Assured": st.column_config.NumberColumn("Cover", format="₹%.2f", min_value=0.0),
+                "Maturity Value": st.column_config.NumberColumn("Maturity", format="₹%.2f", min_value=0.0),
+                "Start Date": st.column_config.DateColumn("Start", format="YYYY-MM-DD"),
+                "Maturity Date": st.column_config.DateColumn("Maturity Date", format="YYYY-MM-DD"),
+                "Is Active": st.column_config.CheckboxColumn("Active"),
+                "Notes": st.column_config.TextColumn("Notes"),
+            },
+            hide_index=True,
+            key="insurance_inventory_editor",
+        )
+        st.session_state.insurance_policies = edited_ins
+
+        if st.button("Save Policies", type="primary", use_container_width=True, key="save_insurance_policies"):
+            db.sync_insurance_policies(st.session_state.user.id, st.session_state.insurance_policies)
+            st.success("Policies saved.")
+            st.rerun()
+
+    with ins_tab3:
+        if traps:
+            for trap in traps:
+                st.error(
+                    f"{trap['policy_name']} | Estimated IRR: {trap['estimated_irr']*100:.2f}% | "
+                    f"Surrender: ₹{trap['surrender_value']:,.0f} | ELSS alt: ₹{trap['elss_projection']:,.0f}"
+                )
+                st.warning(
+                    f"Consider surrendering — redirect Rs {trap['annual_premium']:,.0f}/yr to term plan + ELSS",
+                    icon="⚠️",
+                )
+        else:
+            st.success("No obvious endowment/ULIP trap found in active policies.")
+
+        st.caption("Discuss surrender with a SEBI-registered advisor.")
 
 
 # ============================================================================

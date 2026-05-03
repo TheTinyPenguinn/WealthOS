@@ -48,6 +48,17 @@ def get_deductions_summary(user_id, fy, supabase) -> dict:
     s80d_self = _sum_by_types(rows, {"health_insurance_self"})
     s80d_parents = _sum_by_types(rows, {"health_insurance_parents"})
 
+    # Insurance premiums (active policies) should feed 80C tracker.
+    ins_res = supabase.table("insurance_policies").select("*").eq("user_id", user_id).eq("is_active", True).execute()
+    ins_rows = ins_res.data or []
+    life_policy_types = {"term_life", "endowment", "money_back", "ulip"}
+    insurance_80c = sum(
+        float(r.get("annual_premium", 0.0) or 0.0)
+        for r in ins_rows
+        if r.get("policy_type") in life_policy_types
+    )
+    s80c_invested += insurance_80c
+
     s80c_gap = max(0.0, LIMIT_80C - min(s80c_invested, LIMIT_80C))
     nps_gap = max(0.0, LIMIT_NPS - min(nps_invested, LIMIT_NPS))
     s80d_total = min(s80d_self, LIMIT_80D_SELF) + min(s80d_parents, LIMIT_80D_PARENTS)

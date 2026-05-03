@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "[1/8] Syntax compile checks"
+echo "[1/9] Syntax compile checks"
 PYTHONPYCACHEPREFIX="$ROOT_DIR/.pycache_tmp" python3 - <<'PY'
 import py_compile
 
@@ -21,6 +21,7 @@ files = [
     "app/tax/regime_compare.py",
     "app/tax/ca_export.py",
     "app/tax/capital_gains.py",
+    "app/insurance/audit.py",
     "scripts/run.py",
 ]
 for f in files:
@@ -28,7 +29,7 @@ for f in files:
 print("PASS: syntax compilation")
 PY
 
-echo "[2/8] LLM client modular tests"
+echo "[2/9] LLM client modular tests"
 python3 - <<'PY'
 import os
 import importlib.util
@@ -49,7 +50,7 @@ assert mod._resolve_api_key("gemini", "manual-key") == "manual-key"
 print("PASS: llm_client behavior")
 PY
 
-echo "[3/8] AMFI + FX provider cache tests"
+echo "[3/9] AMFI + FX provider cache tests"
 python3 - <<'PY'
 import io
 import json
@@ -173,7 +174,7 @@ finally:
 print("PASS: amfi/fx caching and conversion")
 PY
 
-echo "[4/8] Phase wiring contract checks"
+echo "[4/9] Phase wiring contract checks"
 python3 - <<'PY'
 from pathlib import Path
 
@@ -194,6 +195,9 @@ assert "compare_regimes" in app_text
 assert "generate_ca_export_pdf" in app_text
 assert "get_harvesting_alerts" in app_text
 assert "Capital Gains" in app_text
+assert "tab6" in app_text
+assert "Insurance" in app_text
+assert "detect_endowment_traps" in app_text
 
 # Ensure no direct model SDK usage in app.py.
 for forbidden in ("google.generativeai", "GenerativeModel("):
@@ -210,6 +214,7 @@ for required in (
     "load_tax_investments",
     "sync_tax_investments",
     "sync_capital_gains",
+    "sync_insurance_policies",
 ):
     assert required in db_text, f"Missing db support: {required}"
 
@@ -228,7 +233,7 @@ for key in (
 print("PASS: phase contract wiring")
 PY
 
-echo "[5/8] OCR parser + privacy tests"
+echo "[5/9] OCR parser + privacy tests"
 python3 - <<'PY'
 import sys
 sys.path.insert(0, ".")
@@ -301,7 +306,7 @@ finally:
 print("PASS: OCR parser privacy + zero-retention flow")
 PY
 
-echo "[6/8] Tax module tests"
+echo "[6/9] Tax module tests"
 python3 - <<'PY'
 from app.tax.deductions import get_deductions_summary
 from app.tax.regime_compare import calc_tax, compare_regimes
@@ -331,16 +336,22 @@ class SupabaseStub:
             {"user_id": "u1", "financial_year": "2025-2026", "instrument_type": "nps_80ccd1b", "amount_invested": 20000},
             {"user_id": "u1", "financial_year": "2025-2026", "instrument_type": "health_insurance_self", "amount_invested": 15000},
         ]
+        self.insurance_rows = [
+            {"user_id": "u1", "policy_type": "term_life", "annual_premium": 12000, "is_active": True},
+        ]
     def table(self, name):
-        assert name == "tax_investments"
-        return Query(self.tax_rows)
+        if name == "tax_investments":
+            return Query(self.tax_rows)
+        if name == "insurance_policies":
+            return Query(self.insurance_rows)
+        raise AssertionError(f"Unexpected table {name}")
 
 sb = SupabaseStub()
 summary = get_deductions_summary("u1", "2025-2026", sb)
-assert summary["s80c"]["invested"] == 100000
+assert summary["s80c"]["invested"] == 112000
 assert summary["s_nps"]["invested"] == 20000
 assert summary["s80d"]["self"] == 15000
-assert summary["s80c"]["gap"] == 50000
+assert summary["s80c"]["gap"] == 38000
 
 assert round(calc_tax(500000, [(250000, 0), (500000, 0.05), (float("inf"), 0.30)]), 2) == 13000.0
 cmp = compare_regimes(1500000, {"s80c_invested": 150000, "s_nps_invested": 50000, "s80d_total": 25000})
@@ -360,7 +371,7 @@ assert isinstance(pdf, (bytes, bytearray)) and len(pdf) > 100
 print("PASS: tax modules")
 PY
 
-echo "[7/8] Capital gains module tests"
+echo "[7/9] Capital gains module tests"
 python3 - <<'PY'
 import app.tax.capital_gains as cg
 
@@ -409,7 +420,76 @@ finally:
 print("PASS: capital gains module")
 PY
 
-echo "[8/8] Quick streamlit route check (already-running app preferred)"
+echo "[8/9] Insurance audit module tests"
+python3 - <<'PY'
+from app.insurance.audit import audit_life_cover, audit_health_cover, detect_endowment_traps
+
+class Result:
+    def __init__(self, data):
+        self.data = data
+
+class Query:
+    def __init__(self, table, rows):
+        self.table = table
+        self.rows = rows
+        self.filters = {}
+        self._limit = None
+    def select(self, *_):
+        return self
+    def eq(self, key, val):
+        self.filters[key] = val
+        return self
+    def limit(self, n):
+        self._limit = n
+        return self
+    def execute(self):
+        data = [r for r in self.rows if all(r.get(k) == v for k, v in self.filters.items())]
+        if self._limit is not None:
+            data = data[:self._limit]
+        return Result(data)
+
+class SupabaseStub:
+    def __init__(self):
+        self.insurance = [
+            {
+                "user_id": "u1", "policy_name": "Term A", "policy_type": "term_life",
+                "annual_premium": 12000, "sum_assured": 5000000, "is_active": True,
+                "start_date": "2024-01-01", "maturity_date": "2044-01-01", "maturity_value": 0
+            },
+            {
+                "user_id": "u1", "policy_name": "ULIP X", "policy_type": "ulip",
+                "annual_premium": 50000, "sum_assured": 300000, "is_active": True,
+                "start_date": "2024-01-01", "maturity_date": "2034-01-01", "maturity_value": 350000
+            },
+            {
+                "user_id": "u1", "policy_name": "Health A", "policy_type": "health",
+                "annual_premium": 18000, "sum_assured": 800000, "is_active": True,
+                "start_date": "2024-01-01", "maturity_date": None, "maturity_value": 0
+            },
+        ]
+        self.profile = [{"user_id": "u1", "monthly_income": 100000}]
+    def table(self, name):
+        if name == "insurance_policies":
+            return Query(name, self.insurance)
+        if name == "user_profile":
+            return Query(name, self.profile)
+        raise AssertionError(f"Unexpected table {name}")
+
+sb = SupabaseStub()
+life = audit_life_cover("u1", sb)
+health = audit_health_cover("u1", sb)
+traps = detect_endowment_traps("u1", sb)
+
+assert life["recommended"] == 12000000
+assert life["actual"] == 5000000
+assert life["adequacy"] == "underinsured"
+assert health["actual"] == 800000
+assert health["adequacy"] == "underinsured"
+assert traps and traps[0]["policy_name"] == "ULIP X"
+print("PASS: insurance audit module")
+PY
+
+echo "[9/9] Quick streamlit route check (already-running app preferred)"
 if command -v curl >/dev/null 2>&1; then
   if curl -sS -o /tmp/wealthos_health.html -w "%{http_code}" "http://127.0.0.1:8514" | grep -q "200"; then
     echo "PASS: streamlit reachable at http://127.0.0.1:8514"
