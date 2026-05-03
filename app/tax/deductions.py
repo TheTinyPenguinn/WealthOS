@@ -24,14 +24,17 @@ def _sum_by_types(rows, allowed_types):
 
 
 def get_deductions_summary(user_id, fy, supabase) -> dict:
-    res = (
-        supabase.table("tax_investments")
-        .select("*")
-        .eq("user_id", user_id)
-        .eq("financial_year", fy)
-        .execute()
-    )
-    rows = res.data or []
+    try:
+        res = (
+            supabase.table("tax_investments")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("financial_year", fy)
+            .execute()
+        )
+        rows = res.data or []
+    except Exception:
+        rows = []
 
     s80c_types = {
         "epf",
@@ -49,8 +52,11 @@ def get_deductions_summary(user_id, fy, supabase) -> dict:
     s80d_parents = _sum_by_types(rows, {"health_insurance_parents"})
 
     # Insurance premiums (active policies) should feed 80C tracker.
-    ins_res = supabase.table("insurance_policies").select("*").eq("user_id", user_id).eq("is_active", True).execute()
-    ins_rows = ins_res.data or []
+    try:
+        ins_res = supabase.table("insurance_policies").select("*").eq("user_id", user_id).eq("is_active", True).execute()
+        ins_rows = ins_res.data or []
+    except Exception:
+        ins_rows = []
     life_policy_types = {"term_life", "endowment", "money_back", "ulip"}
     insurance_80c = sum(
         float(r.get("annual_premium", 0.0) or 0.0)

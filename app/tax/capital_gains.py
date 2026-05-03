@@ -35,8 +35,11 @@ def classify(asset_type, buy_date, sell_date) -> str:
 
 def get_gains_summary(user_id, fy, supabase) -> dict:
     start, end = _fy_bounds(fy)
-    res = supabase.table("capital_gains").select("*").eq("user_id", user_id).execute()
-    rows = res.data or []
+    try:
+        res = supabase.table("capital_gains").select("*").eq("user_id", user_id).execute()
+        rows = res.data or []
+    except Exception:
+        rows = []
 
     total_ltcg = 0.0
     total_stcg = 0.0
@@ -97,8 +100,11 @@ def _mf_current_price(asset_name: str, supabase):
 
 
 def get_unrealised(user_id, supabase) -> list[dict]:
-    res = supabase.table("capital_gains").select("*").eq("user_id", user_id).execute()
-    rows = res.data or []
+    try:
+        res = supabase.table("capital_gains").select("*").eq("user_id", user_id).execute()
+        rows = res.data or []
+    except Exception:
+        rows = []
     today = date.today()
     out = []
 
@@ -137,8 +143,11 @@ def get_unrealised(user_id, supabase) -> list[dict]:
 
 
 def get_harvesting_alerts(user_id, supabase) -> list[str]:
-    positions = get_unrealised(user_id, supabase)
-    summary = get_gains_summary(user_id, current_financial_year(), supabase)
+    try:
+        positions = get_unrealised(user_id, supabase)
+        summary = get_gains_summary(user_id, current_financial_year(), supabase)
+    except Exception:
+        return []
     alerts = []
 
     for pos in positions:

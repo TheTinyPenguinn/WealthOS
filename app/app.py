@@ -4,6 +4,28 @@ Tabbed layout with Investment Tracking, True Net Worth calculation, Zerodha Inte
 and Asset/Liability tracking.
 """
 
+import sys
+import types
+from pathlib import Path
+
+# Ensure package-style imports like `from app...` resolve correctly when running
+# `streamlit run app/app.py` from project root.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Streamlit can load this file in a way that binds `app` to this module, which
+# breaks imports like `from app.data_providers...`. Force-register `app` as a
+# package pointing to the app directory.
+existing_app = sys.modules.get("app")
+if existing_app is not None and not hasattr(existing_app, "__path__"):
+    del sys.modules["app"]
+if "app" not in sys.modules:
+    pkg = types.ModuleType("app")
+    pkg.__path__ = [str(APP_DIR)]  # namespace package path
+    sys.modules["app"] = pkg
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -16,6 +38,7 @@ import db  # Supabase integration
 from app.data_providers.amfi import get_nav
 from app.data_providers.fx import get_usd_inr
 from app.utils.llm_client import call_llm, call_vision
+from app.utils.bank_statement_csv import parse_bank_statement_csv_from_bytes
 from app.ingestion.ocr_parser import parse_file, confirm_and_save
 from app.tax.deductions import get_deductions_summary, get_80c_alert, current_financial_year
 from app.tax.regime_compare import compare_regimes
@@ -23,7 +46,8 @@ from app.tax.ca_export import generate_ca_export_pdf
 from app.tax.capital_gains import get_gains_summary, get_unrealised, get_harvesting_alerts
 from app.insurance.audit import audit_life_cover, audit_health_cover, detect_endowment_traps
 from app.goals.sequencer import get_ef_status, allocate_surplus
-from ai.agent import run_agent
+from app.scoring.freedom_score import calculate_freedom_score
+from ai.agent import run_agent, run_agent_with_trace
 
 # Fix SSL certificate issues for yfinance on Mac
 os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -44,7 +68,32 @@ except ImportError:
     OPENPYXL_AVAILABLE = False
 
 def _get_secret_or_env(key, default=""):
-    return str(st.secrets.get(key, os.getenv(key, default))).strip()
+    env_value = str(os.getenv(key, default)).strip()
+    if env_value:
+        return env_value
+    try:
+        return str(st.secrets.get(key, default)).strip()
+    except Exception:
+        # Allow running without secrets.toml by falling back to environment variables.
+        return str(default).strip()
+
+
+def _resolved_llm_provider() -> str:
+    """Single source of truth for chat/agent provider (env, secrets, then safe default)."""
+    p = _get_secret_or_env("LLM_PROVIDER", "gemini").strip().lower() or "gemini"
+    if p not in ("gemini", "openai", "anthropic"):
+        return "gemini"
+    return p
+
+
+def _llm_runtime_kwargs() -> dict:
+    """API key from session (optional); provider from env; model from session."""
+    key = st.session_state.get("api_key")
+    return {
+        "api_key": key if key else None,
+        "provider": _resolved_llm_provider(),
+        "model": st.session_state.get("selected_model"),
+    }
 
 # ============================================================================
 # GLOBAL HELPER: LIVE CURRENCY
@@ -128,6 +177,41 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+st.markdown(
+    """
+    <style>
+    /* Hide Streamlit chrome noise only — never `header { display:none }` (breaks layout). */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    [data-testid="stAppViewContainer"] {
+        background: linear-gradient(165deg, #0d1117 0%, #121820 50%, #0d1117 100%);
+    }
+    [data-testid="stHeader"] {
+        background: rgba(13, 17, 23, 0.9);
+        backdrop-filter: blur(6px);
+        border-bottom: 1px solid #21262d;
+    }
+    .block-container {
+        padding-top: 1.1rem;
+        padding-bottom: 2rem;
+    }
+    [data-testid="stVerticalBlock"] > [style*="flex-direction: column"] > div {
+        gap: 0.35rem;
+    }
+    .tier-badge {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 4px 12px;
+        background: #238636;
+        color: #ffffff;
+        font-size: 0.85rem;
+        font-weight: 600;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ============================================================================
 # AUTHENTICATION & STATE MANAGEMENT
 # ============================================================================
@@ -145,6 +229,10 @@ def handle_logout():
 # --- AUTH UI ---
 if st.session_state.user is None:
     st.title("🔐 WealthOS Cloud")
+    supabase_url_hint = _get_secret_or_env("SUPABASE_URL")
+    if supabase_url_hint:
+        project_ref = supabase_url_hint.replace("https://", "").replace(".supabase.co", "")
+        st.caption(f"Connected project: `{project_ref}`")
     auth_tab1, auth_tab2 = st.tabs(["Login", "Sign Up"])
     
     with auth_tab1:
@@ -157,7 +245,15 @@ if st.session_state.user is None:
                     st.session_state.user = res.user
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Login failed: {e}")
+                    msg = str(e)
+                    if "403" in msg:
+                        st.error(
+                            "Login failed: 403 Forbidden. Check SUPABASE_URL/SUPABASE_ANON_KEY "
+                            "and verify Email auth is enabled in Supabase."
+                        )
+                        st.caption(f"Auth error details: {msg}")
+                    else:
+                        st.error(f"Login failed: {e}")
     
     with auth_tab2:
         with st.form("signup_form"):
@@ -168,7 +264,15 @@ if st.session_state.user is None:
                     res = db.supabase.auth.sign_up({"email": new_email, "password": new_password})
                     st.success("Signup successful! You can now Log In.")
                 except Exception as e:
-                    st.error(f"Signup failed: {e}")
+                    msg = str(e)
+                    if "403" in msg:
+                        st.error(
+                            "Signup failed: 403 Forbidden. Most likely invalid Supabase URL/key "
+                            "or Email signup is disabled in Supabase Auth settings."
+                        )
+                        st.caption(f"Auth error details: {msg}")
+                    else:
+                        st.error(f"Signup failed: {e}")
     st.stop()
 
 # --- DATA LOADING (Strict Supabase) ---
@@ -200,7 +304,13 @@ if not st.session_state.data_loaded:
             # 1. Check Supabase (User's personal key)
             # 2. Check st.secrets (Developer's shared key)
             db_api_key = settings.get("api_key", "")
-            secrets_api_key = _get_secret_or_env("GEMINI_API_KEY")
+            provider_for_key = _resolved_llm_provider()
+            provider_env_key = {
+                "gemini": "GEMINI_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "anthropic": "ANTHROPIC_API_KEY",
+            }.get(provider_for_key, "ANTHROPIC_API_KEY")
+            secrets_api_key = _get_secret_or_env(provider_env_key)
             st.session_state.api_key = db_api_key if db_api_key else secrets_api_key
             
             st.session_state.selected_model = settings.get("selected_model", "gemini-1.5-flash")
@@ -257,6 +367,54 @@ def profile_risk_details(profile: dict):
     if ytr < 15:
         return "balanced", ytr, "50% debt / 50% equity"
     return "aggressive", ytr, "20% debt / 80% equity"
+
+
+def _infer_tax_profile(annual_gross_income: float, user_id: str):
+    """Estimate bracket and preferred regime from gross annual income + deductions."""
+    gross_income = max(0.0, float(annual_gross_income or 0.0))
+    deductions_payload = {"s80c_invested": 0.0, "s_nps_invested": 0.0, "s80d_total": 0.0}
+    try:
+        ded = get_deductions_summary(user_id, current_financial_year(), db.supabase)
+        deductions_payload = {
+            "s80c_invested": float(ded["s80c"]["invested"]),
+            "s_nps_invested": float(ded["s_nps"]["invested"]),
+            "s80d_total": float(ded["s80d"]["total"]),
+        }
+    except Exception:
+        pass
+
+    cmp = compare_regimes(gross_income=gross_income, deductions=deductions_payload)
+    regime = cmp.get("recommended", "new")
+    s80c = min(deductions_payload["s80c_invested"], 150000.0)
+    s_nps = min(deductions_payload["s_nps_invested"], 50000.0)
+    s80d = deductions_payload["s80d_total"]
+    taxable_old = max(0.0, gross_income - 75000.0 - s80c - s_nps - s80d)
+    taxable_new = max(0.0, gross_income - 75000.0)
+    taxable = taxable_old if regime == "old" else taxable_new
+
+    if regime == "old":
+        if taxable <= 250000:
+            bracket = 0
+        elif taxable <= 500000:
+            bracket = 5
+        elif taxable <= 1000000:
+            bracket = 20
+        else:
+            bracket = 30
+    else:
+        if taxable <= 300000:
+            bracket = 0
+        elif taxable <= 700000:
+            bracket = 5
+        elif taxable <= 1000000:
+            bracket = 10
+        elif taxable <= 1200000:
+            bracket = 15
+        elif taxable <= 1500000:
+            bracket = 20
+        else:
+            bracket = 30
+    return int(bracket), regime
 
 
 def get_illiquid_net_value():
@@ -431,85 +589,16 @@ def get_portfolio_with_prices(investments_df):
 # SMART CSV PARSER FOR INDIAN BANK STATEMENTS
 # ============================================================================
 
-def clean_numeric(value):
-    """Clean Indian number format (e.g., 1,20,000.00) to float."""
-    if pd.isna(value):
-        return 0.0
-    try:
-        cleaned = str(value).replace(',', '').replace(' ', '').strip()
-        if cleaned == '' or cleaned == '-':
-            return 0.0
-        return float(cleaned)
-    except (ValueError, TypeError):
-        return 0.0
 
 def parse_bank_csv(uploaded_file):
-    """Parse messy Indian bank CSV with smart header detection & Sweep Filtering."""
+    """Parse bank / WealthOS transaction CSV (see app.utils.bank_statement_csv)."""
     try:
-        content = uploaded_file.getvalue().decode('utf-8', errors='ignore')
-        lines = content.splitlines()
-        
-        header_idx = -1
-        for i, line in enumerate(lines[:40]):
-            line_lower = line.lower()
-            if "transaction date" in line_lower and "amount" in line_lower:
-                header_idx = i
-                break
-        
-        if header_idx == -1:
-            st.error("Could not find a valid header row containing 'Transaction Date' and 'Amount'.")
+        raw = uploaded_file.getvalue()
+        df, err = parse_bank_statement_csv_from_bytes(raw)
+        if err:
+            st.error(err)
             return None
-
-        uploaded_file.seek(0)
-        df = pd.read_csv(uploaded_file, header=header_idx, dtype=str, on_bad_lines='skip')
-        
-        col_map = {}
-        amount_col = None
-        type_col = None 
-        
-        for col in df.columns:
-            c_lower = col.lower().strip()
-            if 'date' in c_lower and 'value' not in c_lower:
-                col_map[col] = 'Date'
-            elif 'description' in c_lower or 'narration' in c_lower:
-                col_map[col] = 'Description'
-            elif c_lower == 'amount':
-                amount_col = col
-                col_map[col] = 'Amount'
-            elif 'dr' in c_lower and 'cr' in c_lower and 'balance' not in c_lower:
-                if type_col is None: 
-                    type_col = col
-
-        df = df.rename(columns=col_map)
-        
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
-            df = df.dropna(subset=['Date']) 
-            
-        if 'Amount' in df.columns:
-            df['Amount'] = df['Amount'].apply(clean_numeric)
-            
-            if type_col and type_col in df.columns:
-                def apply_sign(row):
-                    amt = row['Amount']
-                    txn_type = str(row[type_col]).upper().strip()
-                    if 'DR' in txn_type:
-                        return -abs(amt)
-                    elif 'CR' in txn_type:
-                        return abs(amt)
-                    return amt
-                df['Amount'] = df.apply(apply_sign, axis=1)
-
-        if 'Description' in df.columns:
-            df['Description'] = df['Description'].fillna('Unknown')
-            ignore_keywords = ['sweep', 'fd premat', 'fd maturity', 'auto trf']
-            pattern = '|'.join(ignore_keywords)
-            df = df[~df['Description'].str.contains(pattern, case=False, na=False)]
-
-        df['Category'] = 'Needs'
-        
-        return df[['Date', 'Description', 'Amount', 'Category']]
-        
+        return df
     except Exception as e:
         st.error(f"Error parsing CSV: {e}")
         return None
@@ -1155,26 +1244,61 @@ if 'user_profile' not in st.session_state:
 # --- PROFILE SETUP PAGE FOR FIRST-TIME USERS ---
 if not st.session_state.user_profile or st.session_state.user_profile.get("age") is None:
     st.title("👤 Profile Setup")
-    st.caption("Set up your profile to unlock retirement-based risk guidance.")
+    st.caption("Set up your profile to unlock retirement-based risk guidance and auto tax slab estimation.")
     with st.form("profile_setup_form"):
         age = st.number_input("Age", min_value=18, max_value=100, value=28)
         target_retirement_age = st.number_input("Target Retirement Age", min_value=40, max_value=80, value=60)
-        monthly_income = st.number_input("Monthly Income (₹)", min_value=0.0, value=float(st.session_state.get("salary", 0.0)))
+        pay_period = st.selectbox("Fixed Pay Period", options=["Monthly", "Yearly"], index=0)
+        pay_basis = st.selectbox(
+            "Pay Entry Type",
+            options=["Before deductions (Gross)", "After deductions (Net In-hand)"],
+            index=0,
+        )
+        fixed_pay = st.number_input(
+            f"Fixed Pay ({'₹ / month' if pay_period == 'Monthly' else '₹ / year'})",
+            min_value=0.0,
+            value=float(st.session_state.get("salary", 0.0)) if pay_period == "Monthly" else float(st.session_state.get("salary", 0.0)) * 12.0,
+        )
+        annual_deductions = st.number_input(
+            "Estimated yearly deductions (PF/NPS/tax/etc) used for tax slab calc",
+            min_value=0.0,
+            value=0.0,
+        )
         income_type = st.selectbox("Income Type", options=["salaried", "freelance", "business"])
-        tax_bracket = st.number_input("Tax Bracket (%)", min_value=0, max_value=50, value=30)
-        tax_regime = st.selectbox("Tax Regime", options=["new", "old"], index=0)
+
+        annual_input = float(fixed_pay) if pay_period == "Yearly" else float(fixed_pay) * 12.0
+        if pay_basis == "Before deductions (Gross)":
+            annual_gross_for_tax = annual_input
+            annual_take_home = max(0.0, annual_input - float(annual_deductions))
+        else:
+            annual_take_home = annual_input
+            annual_gross_for_tax = annual_input + float(annual_deductions)
+        monthly_income = annual_take_home / 12.0 if annual_take_home > 0 else 0.0
+
+        estimated_tax_bracket, estimated_regime = _infer_tax_profile(annual_gross_for_tax, st.session_state.user.id)
+        st.info(
+            f"Estimated tax slab from entered income and deductions: "
+            f"{estimated_tax_bracket}% ({estimated_regime.upper()} regime)."
+        )
+        st.caption(
+            f"Planning monthly income set to ₹{monthly_income:,.0f}; "
+            f"tax slab estimation uses gross annual income ₹{annual_gross_for_tax:,.0f}."
+        )
         if st.form_submit_button("Save Profile", use_container_width=True):
             profile_payload = {
                 "age": age,
                 "target_retirement_age": target_retirement_age,
                 "monthly_income": monthly_income,
                 "income_type": income_type,
-                "tax_bracket": tax_bracket,
-                "tax_regime": tax_regime,
+                "tax_bracket": estimated_tax_bracket,
+                "tax_regime": estimated_regime,
             }
-            db.upsert_user_profile(st.session_state.user.id, profile_payload)
+            saved = db.upsert_user_profile(st.session_state.user.id, profile_payload)
             st.session_state.user_profile = profile_payload
-            st.success("Profile saved.")
+            if saved:
+                st.success("Profile saved.")
+            else:
+                st.warning("Profile stored for this session. Run DB migrations to persist user_profile.")
             st.rerun()
     st.stop()
 
@@ -1242,8 +1366,29 @@ with st.sidebar.expander("⚙️ Configuration", expanded=True):
         db.sync_settings(st.session_state.user.id, salary_input, st.session_state.api_key, st.session_state.selected_model)
         st.toast("✅ Salary updated", icon="💰")
 
-    api_key_placeholder = "Using shared key" if _get_secret_or_env("GEMINI_API_KEY") and not st.session_state.get('api_key') else "Enter your personal key"
-    api_key_input = st.text_input("Gemini API Key", type="password", value=st.session_state.get('api_key', ''), placeholder=api_key_placeholder, help="Leave blank to use the shared key, or enter your own.")
+    current_provider = _resolved_llm_provider()
+    provider_label = {
+        "gemini": "Gemini API Key",
+        "openai": "OpenAI API Key",
+        "anthropic": "Anthropic API Key",
+    }.get(current_provider, "LLM API Key")
+    provider_env_key = {
+        "gemini": "GEMINI_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }.get(current_provider, "ANTHROPIC_API_KEY")
+    api_key_placeholder = (
+        "Using shared key"
+        if _get_secret_or_env(provider_env_key) and not st.session_state.get('api_key')
+        else "Enter your personal key"
+    )
+    api_key_input = st.text_input(
+        provider_label,
+        type="password",
+        value=st.session_state.get('api_key', ''),
+        placeholder=api_key_placeholder,
+        help="Leave blank to use the shared key, or enter your own.",
+    )
     if api_key_input != st.session_state.get('api_key', ''):
         st.session_state.api_key = api_key_input
         db.sync_settings(st.session_state.user.id, st.session_state.salary, api_key_input, st.session_state.selected_model)
@@ -1443,6 +1588,20 @@ st.sidebar.caption("☁️ WealthOS Cloud Connection Active")
 
 # --- MAIN PAGE - TABBED LAYOUT ---
 st.title("WealthOS v5")
+m1, m2, m3, m4 = st.columns(4)
+with m1:
+    st.metric("Transactions", f"{len(st.session_state.expenses):,}")
+with m2:
+    st.metric("Accounts", f"{len(st.session_state.accounts):,}")
+with m3:
+    st.metric("Investments", f"{len(st.session_state.investments):,}")
+with m4:
+    prov = _resolved_llm_provider()
+    st.metric("AI provider", prov.title())
+st.info(
+    "🔒 Privacy notice: your financial data stays in your Supabase project. "
+    "Only the minimum required context is sent to AI calls."
+)
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 Investments", "🤖 AI Brain", "🧾 Tax", "🛡️ Insurance", "🎯 Goals"])
 
@@ -1451,192 +1610,234 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📊 Dashboard", "💸 Tran
 # ============================================================================
 
 with tab1:
-    # Calculate Cash Flow First metrics for high-income users
-    salary = safe_float(st.session_state.get('salary', 0.0))
+    user_id = st.session_state.user.id
+    score_cache_key = "freedom_score_cache"
+    score_user_key = "freedom_score_cache_user"
+    if score_cache_key not in st.session_state or st.session_state.get(score_user_key) != user_id:
+        st.session_state[score_cache_key] = calculate_freedom_score(user_id, db.supabase)
+        st.session_state[score_user_key] = user_id
+    freedom = st.session_state[score_cache_key]
+    score_value = int(freedom.get("total_score", 0))
+    score_tier = freedom.get("tier", "Building")
+
     net_worth, liquid_net_worth, total_debt, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs, illiquid_net = calculate_metrics(
         st.session_state.expenses,
         st.session_state.investments,
-        st.session_state.accounts
+        st.session_state.accounts,
     )
-    
-    # --- EMPTY STATE ONBOARDING ---
-    if net_worth == 0 and st.session_state.expenses.empty:
-        st.info("👋 **Welcome to WealthOS!** It looks like you're just getting started.")
-        st.markdown("""
-        To begin tracking your finances, please use the **Sidebar** to add your data:
-        1.  **⚙️ Configuration**: Set your monthly salary and Gemini API key.
-        2.  **🏦 Accounts & Cash**: Add your bank balances and manual assets.
-        3.  **🏠 Fixed Living Costs**: List your recurring monthly expenses.
-        4.  **💸 Transactions Tab**: Import your bank statement to see your spending patterns.
-        """)
-        st.divider()  # Just add a visual break, DO NOT use st.stop()
-    
-    # Legacy compatibility for existing code
-    monthly_spend = true_burn
-    savings_rate = surplus_margin
-    fixed_living = monthly_floor  # Now properly calculated
-    
-    # --- METRICS ROW ---
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Net Worth", f"₹{net_worth:,.0f}", delta="All assets - all liabilities")
-    with col2:
-        surplus_color = "normal" if surplus > 0 else "inverse"
-        st.metric("Liquid Net Worth", f"₹{liquid_net_worth:,.0f}", delta_color=surplus_color, help="Total NW excluding illiquid net assets")
-    with col3:
-        st.metric("Debt Interest Burn", f"₹{monthly_interest_burn:,.0f}", delta_color="inverse", help="Money lost to interest every month")
-    with col4:
-        freedom_rate = surplus / 160 if (surplus > 0 and salary > 0) else 0
-        st.metric("Freedom Rate", f"₹{freedom_rate:,.0f}/hr", help="Real Hourly Savings Rate")
 
-    ef_status_dash = get_ef_status(st.session_state.user.id, db.supabase)
-    if ef_status_dash["status"] == "building":
-        st.error(f"EF Status: BUILDING ({ef_status_dash['months_covered']:.1f} months covered)")
-    elif ef_status_dash["status"] == "adequate":
-        st.warning(f"EF Status: ADEQUATE ({ef_status_dash['months_covered']:.1f} months covered)")
-    else:
-        st.success(f"EF Status: STRONG ({ef_status_dash['months_covered']:.1f} months covered)")
-    
-    # --- QUICK ADD TRANSACTION (MOBILE UX) ---
-    with st.expander("➕ Quick Add Transaction", expanded=False):
-        with st.form("quick_add_txn", clear_on_submit=True):
-            q_date = st.date_input("Date", value=datetime.now().date())
-            q_desc = st.text_input("Description", placeholder="Coffee, Rent, etc.")
-            q_amount = st.number_input("Amount", step=100.0, format="%.2f")
-            q_cat = st.selectbox("Category", options=CATEGORIES)
-            
-            if st.form_submit_button("Add Transaction", use_container_width=True):
-                if q_desc:
-                    try:
-                        # Optimistic UI update
-                        new_txn = pd.DataFrame([{
-                            'Date': pd.Timestamp(q_date),
-                            'Description': q_desc,
-                            'Amount': q_amount,
-                            'Category': q_cat
-                        }])
-                        st.session_state.expenses = pd.concat([st.session_state.expenses, new_txn], ignore_index=True)
-                        
-                        # Supabase Sync
-                        db.add_expense(st.session_state.user.id, q_date, q_desc, q_amount, q_cat)
-                        st.success("✅ Transaction added to cloud")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to add transaction: {e}")
-    
-    # Fixed vs Variable Progress Bar
-    if true_burn > 0:
-        fixed_pct = (fixed_living + total_emi) / true_burn * 100
-        st.progress(fixed_pct/100, text=f"{fixed_pct:.0f}% of your burn is Fixed")
-    
-    # Debug UI: Burn Breakdown
-    st.caption(f"🔍 Burn Breakdown: Fixed ₹{monthly_floor:,.0f} + EMI ₹{total_emi:,.0f} + Variable ₹{csv_variable_spend:,.0f} + Unexpected ₹{unexpected_needs:,.0f}")
-    
-    st.divider()
-    
-    st.divider()
-    
-    st.subheader("💀 Survival Stats")
-    upi_bleed, real_hourly, zero_days = analyze_survival_metrics(st.session_state.expenses, st.session_state.salary)
+    # 30-day Freedom Score sparkline
+    score_history = []
+    try:
+        score_res = (
+            db.supabase.table("score_history")
+            .select("date,score")
+            .eq("user_id", user_id)
+            .order("date")
+            .execute()
+        )
+        score_history = score_res.data or []
+    except Exception:
+        score_history = []
+    if score_history:
+        score_df = pd.DataFrame(score_history)
+        score_df["date"] = pd.to_datetime(score_df["date"], errors="coerce")
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
+        score_df = score_df[score_df["date"] >= cutoff].sort_values("date")
+        if not score_df.empty:
+            st.caption("Freedom Score (30-day trend)")
+            st.line_chart(score_df.set_index("date")["score"], height=100)
 
-    s1, s2, s3 = st.columns(3)
+    # ROW 1 — Hero
+    hero_left, hero_right = st.columns([2.2, 1.0])
+    with hero_left:
+        st.markdown(
+            f"<h1 style='margin-bottom:0'>Freedom Score: {score_value}</h1>"
+            f"<span class='tier-badge'>{score_tier}</span>",
+            unsafe_allow_html=True,
+        )
+        weights = {
+            "savings": 250.0,
+            "debt_freedom": 200.0,
+            "runway": 200.0,
+            "tax_efficiency": 150.0,
+            "insurance": 100.0,
+            "goals": 100.0,
+        }
+        labels = {
+            "savings": "Savings",
+            "debt_freedom": "Debt Freedom",
+            "runway": "Runway",
+            "tax_efficiency": "Tax Efficiency",
+            "insurance": "Insurance",
+            "goals": "Goal Progress",
+        }
+        for key, max_points in weights.items():
+            points = float(freedom.get("breakdown", {}).get(key, 0))
+            st.progress(min(max(points / max_points, 0.0), 1.0), text=f"{labels[key]}: {int(points)} / {int(max_points)}")
+
+    with hero_right:
+        st.metric("Liquid Net Worth", f"₹{liquid_net_worth:,.0f}")
+        st.metric("Monthly Surplus", f"₹{surplus:,.0f}")
+        runway_months = (liquid_net_worth / true_burn) if true_burn > 0 else 0.0
+        st.metric("Runway", f"{runway_months:.1f} months")
+
+    st.divider()
+
+    # ROW 2 — Status strip
+    s1, s2, s3, s4 = st.columns(4)
+    ef_status = get_ef_status(user_id, db.supabase)
     with s1:
-        st.metric("UPI Bleed (Micro-cuts)", f"₹{upi_bleed:,.0f}", help="Total UPI spends < ₹500")
+        status_label = ef_status.get("status", "building").upper()
+        if status_label == "BUILDING":
+            st.error(f"EF: {status_label}")
+        elif status_label == "ADEQUATE":
+            st.warning(f"EF: {status_label}")
+        else:
+            st.success(f"EF: {status_label}")
     with s2:
-        st.metric("Real Hourly Wage", f"₹{real_hourly:,.0f}/hr", help="(Salary - Needs) / 160 hrs")
+        ded = get_deductions_summary(user_id, current_financial_year(), db.supabase)
+        ratio_80c = ded["s80c"]["invested"] / max(float(ded["s80c"]["limit"]), 1.0)
+        st.progress(min(ratio_80c, 1.0), text=f"80C: ₹{ded['s80c']['invested']:,.0f} / ₹{ded['s80c']['limit']:,.0f}")
     with s3:
-        st.metric("Zero Spend Days", f"{zero_days}", help="Days in last 30 days with ₹0 spend")
-    
-    st.divider()
-    
-    # --- FUTURE SIMULATION CONTAINER ---
-    st.subheader("🔮 Future Simulation")
-    
-    # Runway Extender Chart
-    runway_chart = plot_runway_impact(liquid_net_worth, true_burn, upi_bleed)
-    if runway_chart:
-        st.plotly_chart(runway_chart, use_container_width=True)
-
-    utilisation_pct, revolving_cost, apr_badges = get_credit_card_intelligence()
-    ccu1, ccu2 = st.columns(2)
-    with ccu1:
-        st.metric("Credit Utilisation", f"{utilisation_pct:.1f}%")
-    with ccu2:
-        st.metric("Revolving Cost", f"₹{revolving_cost:,.0f}/mo")
-    for badge in apr_badges:
-        st.error(badge)
-    
-    # Detected Recurring Expenses
-    subscriptions = analyze_subscriptions(st.session_state.expenses)
-    if not subscriptions.empty:
-        with st.expander("🔄 Detected Recurring Expenses"):
-            display_cols = ['Count', 'Monthly_Avg', 'Yearly_Cost', 'Status']
-            display_df = subscriptions[display_cols].rename(columns={
-                'Count': 'Transactions',
-                'Monthly_Avg': 'Monthly Avg',
-                'Yearly_Cost': 'Yearly Cost'
-            })
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-    
-    st.divider()
-    
-    # --- VISUALS ROW ---
-    c1, c2 = st.columns([2, 1])
-    
-    with c1:
-        st.subheader("💸 Spending Health")
-        if true_burn > 0:
-            # Create a "Burn Bar" - borrowing from React idea
-            # Assuming a simplified "Budget" of Income (if available) or just visualization
-            st.caption("Spending Mix (Needs vs Wants)")
-            
-            # Calculate Needs/Wants split
-            mask = st.session_state.expenses['Amount'] < 0
-            needs = st.session_state.expenses[mask & (st.session_state.expenses['Category'] == 'Needs')]['Amount'].sum()
-            wants = st.session_state.expenses[mask & (st.session_state.expenses['Category'] == 'Wants')]['Amount'].sum()
-            total = abs(needs) + abs(wants)
-            
-            if total > 0:
-                needs_pct = (abs(needs) / total)
-                wants_pct = (abs(wants) / total)
-                
-                st.progress(needs_pct, text=f"Needs: {int(needs_pct*100)}%")
-                st.progress(wants_pct, text=f"Wants: {int(wants_pct*100)}%")
-                
-                if wants_pct > 0.3:
-                    st.warning(f"⚠️ High 'Wants' Usage: {int(wants_pct*100)}% of tracked spending.")
-                else:
-                    st.success("✅ Healthy 'Wants' Ratio (<30%)")
-
-    with c2:
-        st.subheader("Surplus Analysis")
-        if surplus > 0:
-            st.success(f"🚀 Positive Surplus: ₹{surplus:,.0f}/month ({surplus_margin:.1f}%)")
+        _, revolving_cost, apr_badges = get_credit_card_intelligence()
+        if apr_badges:
+            st.error("High-APR debt alert")
+            st.caption(f"Revolving cost: ₹{revolving_cost:,.0f}/mo")
         else:
-            st.error(f"📉 Negative Surplus: ₹{surplus:,.0f}/month ({surplus_margin:.1f}%)")
-        
-        st.caption("💡 Use surplus for debt repayment or investments")
+            st.success("No high-APR alert")
+    with s4:
+        life_audit = audit_life_cover(user_id, db.supabase)
+        health_audit = audit_health_cover(user_id, db.supabase)
+        life_cov = 1.0 if life_audit["recommended"] <= 0 else min(life_audit["actual"] / life_audit["recommended"], 1.0)
+        health_cov = min(health_audit["actual"] / max(health_audit["recommended"], 1.0), 1.0)
+        coverage = (life_cov + health_cov) / 2.0
+        st.progress(coverage, text=f"Insurance Coverage: {int(coverage * 100)}%")
 
     st.divider()
-    
-    # --- DEBUG: ANOMALY INSPECTOR ---
-    st.subheader("🕵️‍♀️ Anomaly Inspector")
-    st.caption("These transactions are currently labeled 'Needs' or 'Wants' and are over ₹20k. They are ruining your runway math.")
-    
-    if not st.session_state.expenses.empty:
-        # Filter exactly what the AI sees
-        mask = (st.session_state.expenses['Amount'] < 0) & \
-               (st.session_state.expenses['Category'].isin(['Needs', 'Wants'])) & \
-               (st.session_state.expenses['Amount'].abs() > 20000)
-        
-        anomalies = st.session_state.expenses[mask].copy()
-        
-        if not anomalies.empty:
-            st.dataframe(anomalies, use_container_width=True)
-            st.warning(f"⚠️ Total Anomalies: ₹{anomalies['Amount'].abs().sum():,.2f}")
-            st.info("👉 Go to the 'Transactions' tab and change these to 'Financial' or 'One-Time' to remove them from your Burn Rate.")
+
+    # ROW 3 — Charts
+    c_left, c_right = st.columns(2)
+    with c_left:
+        st.subheader("Spend by Category (30 days)")
+        if not st.session_state.expenses.empty:
+            exp = st.session_state.expenses.copy()
+            exp["Date"] = pd.to_datetime(exp["Date"], errors="coerce")
+            cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
+            exp = exp[(exp["Date"] >= cutoff) & (exp["Amount"] < 0)]
+            spend = (
+                exp.assign(Amount=exp["Amount"].abs())
+                .groupby("Category", as_index=False)["Amount"]
+                .sum()
+                .sort_values("Amount", ascending=False)
+            )
+            if not spend.empty and PLOTLY_AVAILABLE:
+                fig = go.Figure(data=[go.Bar(x=spend["Category"], y=spend["Amount"])])
+                fig.update_layout(height=300, margin=dict(l=10, r=10, t=20, b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig, use_container_width=True)
+            elif not spend.empty:
+                st.bar_chart(spend.set_index("Category")["Amount"], height=300)
+            else:
+                st.info("No expense data in last 30 days.")
+    with c_right:
+        st.subheader("Net Worth Trend (6 months)")
+        if not st.session_state.expenses.empty:
+            exp = st.session_state.expenses.copy()
+            exp["Date"] = pd.to_datetime(exp["Date"], errors="coerce")
+            exp = exp.dropna(subset=["Date"])
+            month_idx = pd.date_range(end=pd.Timestamp.now().normalize(), periods=6, freq="MS")
+            monthly_flow = (
+                exp.set_index("Date")
+                .groupby(pd.Grouper(freq="MS"))["Amount"]
+                .sum()
+                .reindex(month_idx, fill_value=0.0)
+            )
+            start_estimate = liquid_net_worth - float(monthly_flow.sum())
+            nw_series = monthly_flow.cumsum() + start_estimate
+            trend_df = pd.DataFrame({"month": month_idx, "net_worth": nw_series.values}).set_index("month")
+            st.line_chart(trend_df["net_worth"], height=300)
         else:
-            st.success("✅ No large anomalies found in Needs/Wants!")
+            st.info("Add transactions to unlock trend chart.")
+
+    st.divider()
+
+    # ROW 4 — AI CFO Chat
+    st.subheader("AI CFO Chat")
+    if "cfo_chat_messages" not in st.session_state:
+        st.session_state.cfo_chat_messages = []
+
+    for msg in st.session_state.cfo_chat_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            for tool_evt in msg.get("tool_events", []):
+                with st.expander(f"> Called {tool_evt.get('tool_name', 'tool')}()", expanded=False):
+                    st.json(
+                        {
+                            "arguments": tool_evt.get("arguments", {}),
+                            "output": tool_evt.get("output", {}),
+                        }
+                    )
+
+    prompt = st.chat_input("Ask your CFO anything about your money decisions.")
+    if prompt:
+        provider = _resolved_llm_provider()
+        env_key_name = {
+            "gemini": "GEMINI_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+        }.get(provider, "GEMINI_API_KEY")
+        has_key = bool(st.session_state.api_key or _get_secret_or_env(env_key_name))
+        if not has_key:
+            st.error(f"Missing provider key: {env_key_name}")
+        else:
+            st.session_state.cfo_chat_messages.append({"role": "user", "content": prompt})
+            with st.spinner("CFO is thinking..."):
+                reply, tool_events = run_agent_with_trace(
+                    prompt, user_id, db.supabase, **_llm_runtime_kwargs()
+                )
+            st.session_state.cfo_chat_messages.append(
+                {
+                    "role": "assistant",
+                    "content": reply,
+                    "tool_events": tool_events,
+                }
+            )
+            st.rerun()
+
+    st.divider()
+
+    # ROW 5 — Active Alerts
+    st.subheader("Active Alerts")
+    alerts = []
+    tax_alert = get_80c_alert(user_id, db.supabase)
+    if tax_alert:
+        alerts.append(("warning", tax_alert))
+
+    for h_alert in get_harvesting_alerts(user_id, db.supabase):
+        alerts.append(("warning", h_alert))
+
+    trap_rows = detect_endowment_traps(user_id, db.supabase)
+    for trap in trap_rows:
+        alerts.append(
+            (
+                "error",
+                f"{trap.get('policy_name', 'Policy')} IRR {trap.get('estimated_irr', 0.0) * 100:.1f}% is below 7%.",
+            )
+        )
+
+    if life_audit["adequacy"] != "adequate":
+        alerts.append(("error", f"Life cover gap: ₹{life_audit['gap']:,.0f}."))
+    if health_audit["adequacy"] != "adequate":
+        alerts.append(("error", f"Health cover gap: ₹{health_audit['gap']:,.0f}."))
+
+    if not alerts:
+        st.success("No active alerts. Keep compounding.")
+    else:
+        for level, text in alerts:
+            if level == "error":
+                st.error(text)
+            else:
+                st.warning(text)
 
 # ============================================================================
 # TAB 2: TRANSACTIONS
@@ -1763,6 +1964,19 @@ with tab2:
     
     # --- CSV UPLOADER (MOBILE UX) ---
     with st.expander("📤 Import Bank Statement (CSV)", expanded=False):
+        tmpl = "date,description,amount,category\n2026-01-15,Sample purchase,-250.50,Needs\n2026-01-16,Salary credit,120000,Income\n"
+        st.caption(
+            "Expected: a header row with **date** and **amount** (or debit/credit). "
+            "Semicolon or tab separators are OK. UTF-8 or Excel-exported CSV supported."
+        )
+        st.download_button(
+            "Download example CSV",
+            data=tmpl,
+            file_name="wealthos_transactions_sample.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="tab2_csv_template_dl",
+        )
         uploaded_file = st.file_uploader(
             "Upload Bank Statement",
             type=['csv'],
@@ -2110,7 +2324,11 @@ with tab3:
 
 with tab4:
     st.header("🤖 WealthOS Consultant")
-    st.caption("Powered by WealthOS Agent")
+    st.caption(
+        f"Provider is **{_resolved_llm_provider()}** (set `LLM_PROVIDER` in `.env` to "
+        "`gemini`, `openai`, or `anthropic`; the app calls that vendor's API using your sidebar or env API key — "
+        "it does not auto-detect from the key text)."
+    )
     
     # --- CONNECTION DOCTOR & SETTINGS ---
     with st.expander("🛠️ AI Settings & Status", expanded=False):
@@ -2124,7 +2342,7 @@ with tab4:
         with c1:
             if st.button("Check API Access"):
                 try:
-                    provider = _get_secret_or_env("LLM_PROVIDER", "gemini").lower() or "gemini"
+                    provider = _resolved_llm_provider()
                     call_llm(
                         "Reply with OK.",
                         system_prompt=risk_system_prompt,
@@ -2166,7 +2384,7 @@ with tab4:
         st.info("💡 The AI analyzes your Net Worth, Surplus, and Debt Interest. No account numbers are shared.")
         
     if st.button("Analyze Finances", type="primary"):
-        provider = _get_secret_or_env("LLM_PROVIDER", "gemini").lower() or "gemini"
+        provider = _resolved_llm_provider()
         env_key_name = {
             "gemini": "GEMINI_API_KEY",
             "openai": "OPENAI_API_KEY",
@@ -2178,7 +2396,12 @@ with tab4:
         else:
             with st.spinner("Thinking..."):
                 try:
-                    response_text = run_agent(user_query, st.session_state.user.id, db.supabase)
+                    response_text = run_agent(
+                        user_query,
+                        st.session_state.user.id,
+                        db.supabase,
+                        **_llm_runtime_kwargs(),
+                    )
                     
                     st.markdown("### 🧠 CFO Analysis")
                     st.markdown(response_text)

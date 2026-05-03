@@ -68,7 +68,12 @@ def _call_text_llm(
     full_prompt = prompt if not system_prompt else f"{system_prompt}\n\n{prompt}"
 
     if selected_provider == "gemini":
-        import google.generativeai as genai
+        try:
+            import google.generativeai as genai
+        except ImportError as e:
+            raise RuntimeError(
+                "Missing package `google-generativeai`. Run: pip install google-generativeai"
+            ) from e
 
         genai.configure(api_key=selected_key)
         use_model = model or "gemini-1.5-flash"
@@ -76,7 +81,10 @@ def _call_text_llm(
         return (response.text or "").strip()
 
     if selected_provider == "openai":
-        from openai import OpenAI
+        try:
+            from openai import OpenAI
+        except ImportError as e:
+            raise RuntimeError("Missing package `openai`. Run: pip install openai") from e
 
         client = OpenAI(api_key=selected_key)
         use_model = model or "gpt-4o-mini"
@@ -88,7 +96,13 @@ def _call_text_llm(
         )
         return (response.choices[0].message.content or "").strip()
 
-    from anthropic import Anthropic
+    try:
+        from anthropic import Anthropic
+    except ImportError as e:
+        raise RuntimeError(
+            "Missing package `anthropic`. Run: pip install anthropic "
+            "or set LLM_PROVIDER=gemini and use GEMINI_API_KEY."
+        ) from e
 
     client = Anthropic(api_key=selected_key)
     use_model = model or "claude-3-5-sonnet-latest"
@@ -180,7 +194,12 @@ def call_vision(
         raise RuntimeError(f"Missing API key for provider '{selected_provider}'.")
 
     if selected_provider == "gemini":
-        import google.generativeai as genai
+        try:
+            import google.generativeai as genai
+        except ImportError as e:
+            raise RuntimeError(
+                "Missing package `google-generativeai`. Run: pip install google-generativeai"
+            ) from e
 
         genai.configure(api_key=selected_key)
         use_model = model or "gemini-1.5-flash"
@@ -191,7 +210,10 @@ def call_vision(
 
     if selected_provider == "openai":
         import base64
-        from openai import OpenAI
+        try:
+            from openai import OpenAI
+        except ImportError as e:
+            raise RuntimeError("Missing package `openai`. Run: pip install openai") from e
 
         client = OpenAI(api_key=selected_key)
         use_model = model or "gpt-4o-mini"
