@@ -13,6 +13,9 @@ import json
 from datetime import date, datetime
 import certifi
 import db  # Supabase integration
+from app.data_providers.amfi import get_nav
+from app.data_providers.fx import get_usd_inr
+from app.utils.llm_client import call_llm, call_vision
 
 # Fix SSL certificate issues for yfinance on Mac
 os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -32,13 +35,8 @@ try:
 except ImportError:
     OPENPYXL_AVAILABLE = False
 
-# Optional Google Gemini import for AI features (new google.genai package)
-try:
-    from google import genai
-    GEMINI_AVAILABLE = True
-except ImportError:
-    GEMINI_AVAILABLE = False
-    genai = None
+def _get_secret_or_env(key, default=""):
+    return str(st.secrets.get(key, os.getenv(key, default))).strip()
 
 # ============================================================================
 # GLOBAL HELPER: LIVE CURRENCY
@@ -48,10 +46,7 @@ except ImportError:
 def get_usd_rate():
     """Get live USD to INR exchange rate with fallback."""
     try:
-        if YFINANCE_AVAILABLE:
-            ticker = yf.Ticker("USDINR=X")
-            rate = ticker.history(period="1d")['Close'].iloc[-1]
-            return float(rate)
+        return float(get_usd_inr(db.supabase))
     except Exception:
         pass
     return 87.5  # Fallback rate
@@ -182,18 +177,10 @@ if not st.session_state.data_loaded:
             # 1. Check Supabase (User's personal key)
             # 2. Check st.secrets (Developer's shared key)
             db_api_key = settings.get("api_key", "")
-            secrets_api_key = st.secrets.get("GEMINI_KEY", "")
+            secrets_api_key = _get_secret_or_env("GEMINI_API_KEY")
             st.session_state.api_key = db_api_key if db_api_key else secrets_api_key
             
             st.session_state.selected_model = settings.get("selected_model", "gemini-1.5-flash")
-            
-            # Global configuration for Gemini
-            if st.session_state.api_key:
-                try:
-                    import google.generativeai as genai
-                    genai.configure(api_key=st.session_state.api_key)
-                except Exception as e:
-                    st.error(f"Failed to configure Gemini: {e}")
             
             st.session_state.data_loaded = True
             st.rerun()
@@ -256,6 +243,18 @@ def safe_float(val, default=0.0):
 # ============================================================================
 # INVESTMENT ENGINE - PRICE FETCHING WITH CACHING
 # ============================================================================
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_mf_nav(scheme_code):
+    """Fetch current NAV for an Indian Mutual Fund via AMFI cache."""
+    try:
+        nav_data = get_nav(str(scheme_code).strip(), db.supabase)
+        if not nav_data:
+            return None
+        nav = float(nav_data["nav"])
+        return nav if nav > 0 else None
+    except Exception:
+        return None
 
 @st.cache_data(ttl=600, show_spinner=False)  # Cache for 10 minutes
 def fetch_live_price(ticker):
@@ -321,16 +320,17 @@ def get_portfolio_with_prices(investments_df):
         
         live_price = None
         
-        # Skip yfinance for Mutual Funds (they don't have Yahoo tickers)
-        if asset_type != 'Mutual Fund':
+        if asset_type == 'Mutual Fund':
+            # Fetch NAV via mfapi.in using ISIN (e.g. INF123456789)
+            live_price = fetch_mf_nav(ticker)
+        else:
             live_price = fetch_live_price(ticker)
             # Small delay to avoid rate limiting (only if not cached)
             if idx > 0:
                 time.sleep(0.1)
-        
+
         if live_price is None:
-            if asset_type != 'Mutual Fund':  # Only track failures for non-MF
-                failed_tickers.append(ticker)
+            failed_tickers.append(ticker)
             live_price = avg_price  # Fallback to avg price
         else:
             success_count += 1
@@ -998,7 +998,7 @@ def calculate_metrics(expenses_df, investments_df, accounts_df):
             continue
         
         if t == 'Bank/Cash': bank_cash += val
-        elif t == 'Credit Card': credit_card += val
+        elif t == 'Credit Card': credit_card += abs(val)  # always treat as positive liability
         elif 'Investment' in t: 
             investments_sidebar += val
             # RSU Logic: Check if account name contains RSU (case-insensitive)
@@ -1059,15 +1059,18 @@ with st.sidebar.expander("📣 Report Bug / Suggest Idea", expanded=False):
 # 2. Metric Summary
 total_portfolio = 0.0
 if not st.session_state.investments.empty:
-    # Assuming calculate_metrics or similar is available or we use simpler logic for sidebar
-    # For now, use basic sum if detailed metrics aren't ready
-    total_portfolio = (st.session_state.investments['Quantity'] * st.session_state.investments['Avg_Buy_Price']).sum()
+    _sidebar_portfolio = get_portfolio_with_prices(st.session_state.investments)
+    if not _sidebar_portfolio.empty and 'Current_Value' in _sidebar_portfolio.columns:
+        total_portfolio = _sidebar_portfolio['Current_Value'].sum()
+    else:
+        total_portfolio = (st.session_state.investments['Quantity'] * st.session_state.investments['Avg_Buy_Price']).sum()
 
 liquid_cash = 0.0
 total_debt_balance = 0.0
 if not st.session_state.accounts.empty:
-    liquid_cash = st.session_state.accounts[st.session_state.accounts['Type'] != 'Credit Card']['Balance'].sum()
-    total_debt_balance = st.session_state.accounts[st.session_state.accounts['Type'] == 'Credit Card']['Balance'].sum()
+    # Only Bank/Cash accounts count as liquid (exclude Investment and Credit Card accounts)
+    liquid_cash = st.session_state.accounts[st.session_state.accounts['Type'] == 'Bank/Cash']['Balance'].sum()
+    total_debt_balance = st.session_state.accounts[st.session_state.accounts['Type'] == 'Credit Card']['Balance'].abs().sum()
 
 m1, m2, m3 = st.sidebar.columns(3)
 with m1:
@@ -1090,7 +1093,7 @@ with st.sidebar.expander("⚙️ Configuration", expanded=True):
         db.sync_settings(st.session_state.user.id, salary_input, st.session_state.api_key, st.session_state.selected_model)
         st.toast("✅ Salary updated", icon="💰")
 
-    api_key_placeholder = "Using shared key" if st.secrets.get("GEMINI_KEY") and not st.session_state.get('api_key') else "Enter your personal key"
+    api_key_placeholder = "Using shared key" if _get_secret_or_env("GEMINI_API_KEY") and not st.session_state.get('api_key') else "Enter your personal key"
     api_key_input = st.text_input("Gemini API Key", type="password", value=st.session_state.get('api_key', ''), placeholder=api_key_placeholder, help="Leave blank to use the shared key, or enter your own.")
     if api_key_input != st.session_state.get('api_key', ''):
         st.session_state.api_key = api_key_input
@@ -1797,9 +1800,20 @@ with tab4:
         with c1:
             if st.button("Check API Access"):
                 try:
-                    import google.generativeai as genai
-                    genai.configure(api_key=st.session_state.api_key)
-                    models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                    provider = _get_secret_or_env("LLM_PROVIDER", "gemini").lower() or "gemini"
+                    call_llm(
+                        "Reply with OK.",
+                        model=st.session_state.get("selected_model", "gemini-1.5-flash"),
+                        api_key=st.session_state.api_key,
+                        provider=provider,
+                        max_tokens=32,
+                    )
+                    default_models = {
+                        "gemini": ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"],
+                        "openai": ["gpt-4o-mini", "gpt-4o", "o4-mini"],
+                        "anthropic": ["claude-3-5-haiku-latest", "claude-3-5-sonnet-latest"],
+                    }
+                    models = default_models.get(provider, default_models["gemini"])
                     st.session_state.available_models = models
                     st.success(f"✅ Found {len(models)} models!")
                 except Exception as e:
@@ -1832,9 +1846,6 @@ with tab4:
         else:
             with st.spinner("Thinking..."):
                 try:
-                    import google.generativeai as genai
-                    genai.configure(api_key=st.session_state.api_key)
-                    
                     # 1. Get Context (Fixed: Pass all required parameters)
                     financial_context = generate_financial_context(net_worth, liquid_cash, total_debt, true_burn, surplus, fixed_living, total_emi, csv_variable_spend, avg_interest)
                     
@@ -1854,13 +1865,16 @@ with tab4:
                     - Be mathematical and direct.
                     - Use Markdown.
                     """
-                    
-                    # 3. Generate
-                    model = genai.GenerativeModel(st.session_state.selected_model)
-                    response = model.generate_content(full_prompt)
+                    provider = _get_secret_or_env("LLM_PROVIDER", "gemini").lower() or "gemini"
+                    response_text = call_llm(
+                        full_prompt,
+                        model=st.session_state.selected_model,
+                        api_key=st.session_state.api_key,
+                        provider=provider,
+                    )
                     
                     st.markdown("### 🧠 CFO Analysis")
-                    st.markdown(response.text)
+                    st.markdown(response_text)
                     
                 except Exception as e:
                     if "429" in str(e):

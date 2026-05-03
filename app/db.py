@@ -10,16 +10,18 @@ import re
 import os
 import time
 
+def _get_secret_or_env(key: str) -> str:
+    return str(st.secrets.get(key, os.getenv(key, ""))).strip()
+
 # Initialize Supabase client
 @st.cache_resource
 def get_supabase_client():
-    # Use st.secrets with fallback to empty string to avoid KeyError
-    url = st.secrets.get("SUPABASE_URL", "").strip()
-    key = st.secrets.get("SUPABASE_KEY", "").strip()
+    url = _get_secret_or_env("SUPABASE_URL")
+    key = _get_secret_or_env("SUPABASE_ANON_KEY") or _get_secret_or_env("SUPABASE_SERVICE_ROLE_KEY")
     
     if not url or not key:
         st.error("Missing Supabase credentials in Streamlit Secrets.")
-        st.info("Please add SUPABASE_URL and SUPABASE_KEY to your app settings.")
+        st.info("Please add SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY).")
         st.stop()
         
     try:
