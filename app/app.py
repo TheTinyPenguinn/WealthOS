@@ -16,6 +16,7 @@ import db  # Supabase integration
 from app.data_providers.amfi import get_nav
 from app.data_providers.fx import get_usd_inr
 from app.utils.llm_client import call_llm, call_vision
+from app.ingestion.ocr_parser import parse_file, confirm_and_save
 
 # Fix SSL certificate issues for yfinance on Mac
 os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -1092,6 +1093,8 @@ def calculate_metrics(expenses_df, investments_df, accounts_df):
 
 if 'parsed_csv' not in st.session_state:
     st.session_state.parsed_csv = pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Category'])
+if 'ocr_transactions' not in st.session_state:
+    st.session_state.ocr_transactions = []
 
 if 'illiquid_assets' not in st.session_state:
     st.session_state.illiquid_assets = pd.DataFrame(
@@ -1590,6 +1593,120 @@ with tab2:
     # --- EMPTY STATE ONBOARDING ---
     if st.session_state.expenses.empty:
         st.info("👋 Welcome! Add your first transaction in Quick Entry menu to see your spending log.")
+
+    st.subheader("Add Transactions")
+    ocr_tab1, ocr_tab2, ocr_tab3 = st.tabs(["Receipt Photo", "PDF Statement", "Manual Entry"])
+
+    with ocr_tab1:
+        receipt_file = st.file_uploader(
+            "Upload receipt photo",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="ocr_receipt_upload",
+        )
+        if receipt_file is not None and st.button("Parse Receipt", use_container_width=True, key="parse_receipt_btn"):
+            with st.spinner("Parsing with AI..."):
+                parsed_rows = parse_file(
+                    file_bytes=receipt_file.getvalue(),
+                    mime_type=receipt_file.type or "image/jpeg",
+                    user_id=str(st.session_state.user.id),
+                    supabase=db.supabase,
+                )
+                st.session_state.ocr_transactions = parsed_rows
+                if parsed_rows:
+                    st.success(f"Parsed {len(parsed_rows)} transactions")
+                else:
+                    st.warning("No transactions found from this receipt.")
+
+    with ocr_tab2:
+        pdf_file = st.file_uploader(
+            "Upload PDF statement",
+            type=["pdf"],
+            key="ocr_pdf_upload",
+        )
+        if pdf_file is not None and st.button("Parse PDF", use_container_width=True, key="parse_pdf_btn"):
+            with st.spinner("Parsing with AI..."):
+                parsed_rows = parse_file(
+                    file_bytes=pdf_file.getvalue(),
+                    mime_type=pdf_file.type or "application/pdf",
+                    user_id=str(st.session_state.user.id),
+                    supabase=db.supabase,
+                )
+                st.session_state.ocr_transactions = parsed_rows
+                if parsed_rows:
+                    st.success(f"Parsed {len(parsed_rows)} transactions")
+                else:
+                    st.warning("No transactions found from this PDF.")
+
+    with ocr_tab3:
+        with st.form("ocr_manual_txn_form", clear_on_submit=True):
+            m_date = st.date_input("Date", value=datetime.now().date(), key="ocr_manual_date")
+            m_merchant = st.text_input("Merchant", key="ocr_manual_merchant")
+            m_amount = st.number_input("Amount", step=100.0, format="%.2f", key="ocr_manual_amount")
+            m_currency = st.text_input("Currency", value="INR", key="ocr_manual_currency")
+            m_category = st.selectbox(
+                "Category",
+                options=["food", "transport", "shopping", "utilities", "entertainment", "health", "income", "other"],
+                key="ocr_manual_category",
+            )
+            if st.form_submit_button("Add to Review List", use_container_width=True):
+                if m_merchant.strip():
+                    staged = st.session_state.get("ocr_transactions", [])
+                    staged.append(
+                        {
+                            "merchant": m_merchant.strip(),
+                            "amount": float(m_amount),
+                            "date": m_date.isoformat(),
+                            "currency": (m_currency or "INR").upper(),
+                            "category": m_category,
+                        }
+                    )
+                    st.session_state.ocr_transactions = staged
+                    st.success("Added to review list.")
+                else:
+                    st.warning("Please enter merchant name.")
+
+    staged_transactions = st.session_state.get("ocr_transactions", [])
+    if staged_transactions:
+        st.markdown("#### Review Parsed Transactions")
+        review_df = pd.DataFrame(staged_transactions)
+        edited_review = st.data_editor(
+            review_df,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config={
+                "merchant": st.column_config.TextColumn("Merchant"),
+                "amount": st.column_config.NumberColumn("Amount", format="%.2f"),
+                "date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
+                "currency": st.column_config.TextColumn("Currency"),
+                "category": st.column_config.SelectboxColumn(
+                    "Category",
+                    options=["food", "transport", "shopping", "utilities", "entertainment", "health", "income", "other"],
+                ),
+            },
+            hide_index=True,
+            key="ocr_review_editor",
+        )
+
+        confirm_col, clear_col = st.columns(2)
+        with confirm_col:
+            if st.button("Confirm & Save", type="primary", use_container_width=True, key="ocr_confirm_save"):
+                try:
+                    count = confirm_and_save(
+                        transactions=edited_review.to_dict(orient="records"),
+                        user_id=str(st.session_state.user.id),
+                        supabase=db.supabase,
+                    )
+                    st.success(f"Saved {count} OCR transactions.")
+                    st.session_state.ocr_transactions = []
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to save OCR transactions: {e}")
+        with clear_col:
+            if st.button("Clear OCR Review", use_container_width=True, key="ocr_clear_review"):
+                st.session_state.ocr_transactions = []
+                st.rerun()
+
+    st.divider()
     
     # --- CSV UPLOADER (MOBILE UX) ---
     with st.expander("📤 Import Bank Statement (CSV)", expanded=False):
