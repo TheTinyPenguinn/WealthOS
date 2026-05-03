@@ -9,3 +9,4 @@ gotrue
 openpyxl
 python-dateutil
 watchdog
+reportlab

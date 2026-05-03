@@ -17,6 +17,9 @@ from app.data_providers.amfi import get_nav
 from app.data_providers.fx import get_usd_inr
 from app.utils.llm_client import call_llm, call_vision
 from app.ingestion.ocr_parser import parse_file, confirm_and_save
+from app.tax.deductions import get_deductions_summary, get_80c_alert, current_financial_year
+from app.tax.regime_compare import compare_regimes
+from app.tax.ca_export import generate_ca_export_pdf
 
 # Fix SSL certificate issues for yfinance on Mac
 os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -1095,6 +1098,10 @@ if 'parsed_csv' not in st.session_state:
     st.session_state.parsed_csv = pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Category'])
 if 'ocr_transactions' not in st.session_state:
     st.session_state.ocr_transactions = []
+if 'tax_investments' not in st.session_state:
+    st.session_state.tax_investments = pd.DataFrame(columns=["Instrument Type", "Amount Invested", "Notes"])
+if 'tax_fy_loaded' not in st.session_state:
+    st.session_state.tax_fy_loaded = ""
 
 if 'illiquid_assets' not in st.session_state:
     st.session_state.illiquid_assets = pd.DataFrame(
@@ -1399,7 +1406,7 @@ st.sidebar.caption("☁️ WealthOS Cloud Connection Active")
 # --- MAIN PAGE - TABBED LAYOUT ---
 st.title("WealthOS v5")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 Investments", "🤖 AI Brain"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 Investments", "🤖 AI Brain", "🧾 Tax"])
 
 # ============================================================================
 # TAB 1: DASHBOARD (Upgraded with Visuals)
@@ -2154,6 +2161,128 @@ with tab4:
                         st.error("⚠️ Quota Limit Hit. Please wait 30s.")
                     else:
                         st.error(f"Error: {e}")
+
+# ============================================================================
+# TAB 5: TAX ENGINE
+# ============================================================================
+
+with tab5:
+    st.header("🧾 Tax Engine")
+
+    fy_current = current_financial_year()
+    start_year = int(fy_current.split("-")[0])
+    fy_options = [f"{start_year - i}-{start_year - i + 1}" for i in range(0, 4)]
+    selected_fy = st.selectbox("Financial Year", fy_options, index=0, key="tax_fy_picker")
+
+    if st.session_state.tax_fy_loaded != selected_fy:
+        st.session_state.tax_investments = db.load_tax_investments(st.session_state.user.id, selected_fy)
+        st.session_state.tax_fy_loaded = selected_fy
+
+    summary = get_deductions_summary(st.session_state.user.id, selected_fy, db.supabase)
+    gross_income = float(st.session_state.user_profile.get("monthly_income") or st.session_state.get("salary", 0.0)) * 12
+    regime_result = compare_regimes(
+        gross_income=gross_income,
+        deductions={
+            "s80c_invested": summary["s80c"]["invested"],
+            "s_nps_invested": summary["s_nps"]["invested"],
+            "s80d_total": summary["s80d"]["total"],
+        },
+    )
+
+    tax_tab1, tax_tab2, tax_tab3 = st.tabs(["80C Dashboard", "Regime Comparison", "CA Export"])
+
+    with tax_tab1:
+        alert = get_80c_alert(st.session_state.user.id, db.supabase)
+        if alert:
+            st.warning(alert)
+
+        p1, p2 = st.columns(2)
+        with p1:
+            st.metric("Section 80C Invested", f"₹{summary['s80c']['invested']:,.0f}")
+            st.progress(
+                min(1.0, summary["s80c"]["invested"] / max(1, summary["s80c"]["limit"])),
+                text=f"80C Progress: ₹{summary['s80c']['invested']:,.0f} / ₹{summary['s80c']['limit']:,.0f}",
+            )
+            st.caption(f"80C Gap: ₹{summary['s80c']['gap']:,.0f}")
+        with p2:
+            st.metric("NPS 80CCD(1B) Invested", f"₹{summary['s_nps']['invested']:,.0f}")
+            st.progress(
+                min(1.0, summary["s_nps"]["invested"] / max(1, summary["s_nps"]["limit"])),
+                text=f"NPS Progress: ₹{summary['s_nps']['invested']:,.0f} / ₹{summary['s_nps']['limit']:,.0f}",
+            )
+            st.caption(f"NPS Gap: ₹{summary['s_nps']['gap']:,.0f}")
+
+        st.info(f"Tax saving potential (approx): ₹{summary['tax_saving_potential']:,.0f}")
+
+        edited_tax = st.data_editor(
+            st.session_state.tax_investments,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config={
+                "Instrument Type": st.column_config.SelectboxColumn(
+                    "Instrument Type",
+                    options=[
+                        "epf",
+                        "ppf",
+                        "elss",
+                        "nsc",
+                        "tax_saver_fd",
+                        "life_insurance_premium",
+                        "home_loan_principal",
+                        "nps_80ccd1b",
+                        "health_insurance_self",
+                        "health_insurance_parents",
+                        "other_80c",
+                    ],
+                    required=True,
+                ),
+                "Amount Invested": st.column_config.NumberColumn("Amount Invested (₹)", format="₹%.2f", min_value=0.0),
+                "Notes": st.column_config.TextColumn("Notes"),
+            },
+            hide_index=True,
+            key="tax_investments_editor",
+        )
+        st.session_state.tax_investments = edited_tax
+
+        if st.button("Save Deductions", type="primary", use_container_width=True, key="tax_save_deductions"):
+            db.sync_tax_investments(st.session_state.user.id, selected_fy, st.session_state.tax_investments)
+            st.success("Deductions saved.")
+            st.rerun()
+
+    with tax_tab2:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("Old Regime Tax", f"₹{regime_result['old_tax']:,.0f}")
+        with c2:
+            st.metric("New Regime Tax", f"₹{regime_result['new_tax']:,.0f}")
+
+        rec = regime_result["recommended"]
+        if rec == "old":
+            st.success(f"Recommended: OLD regime | Savings: ₹{regime_result['saving']:,.0f}")
+        else:
+            st.success(f"Recommended: NEW regime | Savings: ₹{regime_result['saving']:,.0f}")
+
+    with tax_tab3:
+        st.caption("Generate CA-ready PDF summary for selected FY.")
+        user_label = getattr(st.session_state.user, "email", "user")
+        if st.button("Generate CA Export", use_container_width=True, key="tax_generate_ca_export"):
+            try:
+                pdf_bytes = generate_ca_export_pdf(
+                    fy=selected_fy,
+                    user=user_label,
+                    deductions_df=st.session_state.tax_investments,
+                    summary=summary,
+                    regime_result=regime_result,
+                )
+                st.download_button(
+                    "Download Tax Summary PDF",
+                    data=pdf_bytes,
+                    file_name=f"wealthos_tax_summary_{selected_fy}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"Failed to generate PDF export: {e}")
 
 
 # ============================================================================

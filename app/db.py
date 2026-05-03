@@ -365,6 +365,45 @@ def upsert_user_profile(user_id, profile: dict):
     }
     supabase.table("user_profile").upsert(payload, on_conflict="user_id").execute()
 
+def load_tax_investments(user_id, financial_year):
+    """Load tax investments for a financial year."""
+    res = (
+        supabase.table("tax_investments")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("financial_year", financial_year)
+        .execute()
+    )
+    df = ensure_dataframe_schema(res.data, ["instrument_type", "amount_invested", "notes"])
+    return df.rename(
+        columns={
+            "instrument_type": "Instrument Type",
+            "amount_invested": "Amount Invested",
+            "notes": "Notes",
+        }
+    )
+
+def sync_tax_investments(user_id, financial_year, df):
+    """Replace tax investments for one FY."""
+    try:
+        supabase.table("tax_investments").delete().eq("user_id", user_id).eq("financial_year", financial_year).execute()
+        if df is not None and not df.empty:
+            payload = []
+            for _, row in df.iterrows():
+                payload.append(
+                    {
+                        "user_id": user_id,
+                        "financial_year": financial_year,
+                        "instrument_type": str(row.get("Instrument Type", "other_80c")),
+                        "amount_invested": float(row.get("Amount Invested", 0.0)),
+                        "notes": str(row.get("Notes", "")),
+                    }
+                )
+            if payload:
+                supabase.table("tax_investments").insert(payload).execute()
+    except Exception as e:
+        st.error(f"Tax Investments Sync Error: {e}")
+
 def add_expense(user_id, date, desc, amount, category):
     payload = {
         "user_id": user_id,
