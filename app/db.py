@@ -251,6 +251,50 @@ def load_all_data(user_id):
             insurance_policies["Start Date"] = pd.to_datetime(insurance_policies["Start Date"], errors="coerce")
             insurance_policies["Maturity Date"] = pd.to_datetime(insurance_policies["Maturity Date"], errors="coerce")
 
+        # Load Emergency Fund
+        ef_res = supabase.table("emergency_fund").select("*").eq("user_id", user_id).limit(1).execute()
+        if ef_res.data:
+            ef_row = ef_res.data[0]
+            emergency_fund = {
+                "Target Months": int(ef_row.get("target_months") or 6),
+                "Current Amount": float(ef_row.get("current_amount") or 0.0),
+                "Account Name": ef_row.get("account_name", ""),
+            }
+        else:
+            emergency_fund = {"Target Months": 6, "Current Amount": 0.0, "Account Name": ""}
+
+        # Load Goals
+        goals_res = supabase.table("goals").select("*").eq("user_id", user_id).order("priority").execute()
+        goals = ensure_dataframe_schema(
+            goals_res.data,
+            [
+                "name",
+                "goal_type",
+                "target_amount",
+                "target_date",
+                "current_amount",
+                "priority",
+                "is_ring_fenced",
+                "recommended_instrument",
+                "notes",
+            ],
+        )
+        goals = goals.rename(
+            columns={
+                "name": "Name",
+                "goal_type": "Goal Type",
+                "target_amount": "Target Amount",
+                "target_date": "Target Date",
+                "current_amount": "Current Amount",
+                "priority": "Priority",
+                "is_ring_fenced": "Ring Fenced",
+                "recommended_instrument": "Recommended Instrument",
+                "notes": "Notes",
+            }
+        )
+        if not goals.empty:
+            goals["Target Date"] = pd.to_datetime(goals["Target Date"], errors="coerce")
+
         return {
             "settings": settings,
             "accounts": accounts,
@@ -263,6 +307,8 @@ def load_all_data(user_id):
             "user_profile": user_profile,
             "capital_gains": capital_gains,
             "insurance_policies": insurance_policies,
+            "emergency_fund": emergency_fund,
+            "goals": goals,
         }
     except Exception as e:
         st.error(f"Error loading database: {e}")
@@ -527,6 +573,42 @@ def sync_insurance_policies(user_id, df):
                 supabase.table("insurance_policies").insert(payload).execute()
     except Exception as e:
         st.error(f"Insurance Policies Sync Error: {e}")
+
+def upsert_emergency_fund(user_id, ef: dict):
+    payload = {
+        "user_id": user_id,
+        "target_months": int(ef.get("Target Months", 6)),
+        "current_amount": float(ef.get("Current Amount", 0.0)),
+        "account_name": str(ef.get("Account Name", "")),
+    }
+    supabase.table("emergency_fund").upsert(payload, on_conflict="user_id").execute()
+
+def sync_goals(user_id, df):
+    """Replace goal list for user."""
+    try:
+        supabase.table("goals").delete().eq("user_id", user_id).execute()
+        if df is not None and not df.empty:
+            payload = []
+            for _, row in df.iterrows():
+                td = pd.to_datetime(row.get("Target Date"), errors="coerce")
+                payload.append(
+                    {
+                        "user_id": user_id,
+                        "name": str(row.get("Name", "Goal")),
+                        "goal_type": str(row.get("Goal Type", "other")),
+                        "target_amount": float(row.get("Target Amount", 0.0)),
+                        "target_date": td.date().isoformat() if pd.notna(td) else datetime.now().date().isoformat(),
+                        "current_amount": float(row.get("Current Amount", 0.0)),
+                        "priority": int(_safe_int(row.get("Priority", 5), 5)),
+                        "is_ring_fenced": bool(row.get("Ring Fenced", False)),
+                        "recommended_instrument": str(row.get("Recommended Instrument", "")),
+                        "notes": str(row.get("Notes", "")),
+                    }
+                )
+            if payload:
+                supabase.table("goals").insert(payload).execute()
+    except Exception as e:
+        st.error(f"Goals Sync Error: {e}")
 
 def add_expense(user_id, date, desc, amount, category):
     payload = {
