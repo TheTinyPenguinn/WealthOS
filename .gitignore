@@ -14,3 +14,6 @@ __pycache__/
 secrets.toml
 .DS_Store
 .AppleDouble
+
+# Personal / career material — never push
+deck.md
