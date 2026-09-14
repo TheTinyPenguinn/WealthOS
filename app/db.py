@@ -90,6 +90,27 @@ def get_supabase_client_with_retry():
 
 supabase = get_supabase_client_with_retry()
 
+def signup_user(email: str, password: str):
+    """
+    Create an already-confirmed account via the service-role admin API.
+
+    Supabase's built-in email service only delivers to project members and caps
+    sends at ~2/hour, so the confirmation round trip is unusable here: ordinary
+    sign_up() leaves the account unconfirmed and login fails with "Email not
+    confirmed". Replace this with real SMTP before opening signup to the public.
+    """
+    url = _get_secret_or_env("SUPABASE_URL")
+    service_key = _get_secret_or_env("SUPABASE_SERVICE_ROLE_KEY")
+    if not service_key:
+        raise RuntimeError(
+            "SUPABASE_SERVICE_ROLE_KEY is not set, so accounts cannot be created."
+        )
+    admin = create_client(url, service_key)
+    admin.auth.admin.create_user(
+        {"email": email, "password": password, "email_confirm": True}
+    )
+
+
 def ensure_dataframe_schema(df, columns, types=None):
     """Ensure dataframe has correct columns and types, stripping timezones and converting Decimals."""
     if df is None or (isinstance(df, list) and len(df) == 0) or (isinstance(df, pd.DataFrame) and df.empty):

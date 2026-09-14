@@ -261,18 +261,14 @@ if st.session_state.user is None:
             new_password = st.text_input("Password", type="password")
             if st.form_submit_button("Sign Up", use_container_width=True):
                 try:
-                    res = db.supabase.auth.sign_up({"email": new_email, "password": new_password})
-                    st.success("Signup successful! You can now Log In.")
+                    db.signup_user(new_email, new_password)
+                    res = db.supabase.auth.sign_in_with_password(
+                        {"email": new_email, "password": new_password}
+                    )
+                    st.session_state.user = res.user
+                    st.rerun()
                 except Exception as e:
-                    msg = str(e)
-                    if "403" in msg:
-                        st.error(
-                            "Signup failed: 403 Forbidden. Most likely invalid Supabase URL/key "
-                            "or Email signup is disabled in Supabase Auth settings."
-                        )
-                        st.caption(f"Auth error details: {msg}")
-                    else:
-                        st.error(f"Signup failed: {e}")
+                    st.error(f"Signup failed: {e}")
     st.stop()
 
 # --- DATA LOADING (Strict Supabase) ---
@@ -1241,13 +1237,31 @@ if 'credit_cards' not in st.session_state:
 if 'user_profile' not in st.session_state:
     st.session_state.user_profile = {}
 
-# --- PROFILE SETUP PAGE FOR FIRST-TIME USERS ---
-if not st.session_state.user_profile or st.session_state.user_profile.get("age") is None:
-    st.title("👤 Profile Setup")
-    st.caption("Set up your profile to unlock retirement-based risk guidance and auto tax slab estimation.")
+# --- PROFILE SETUP PAGE (first-time users, and reopened from the sidebar) ---
+if 'show_profile' not in st.session_state:
+    st.session_state.show_profile = False
+
+_first_time_setup = not st.session_state.user_profile or st.session_state.user_profile.get("age") is None
+
+if _first_time_setup or st.session_state.show_profile:
+    _saved = st.session_state.user_profile or {}
+    if _first_time_setup:
+        st.title("👤 Profile Setup")
+        st.caption("Set up your profile to unlock retirement-based risk guidance and auto tax slab estimation.")
+    else:
+        st.title("👤 Your Profile")
+        st.caption("Update your details. Saving recalculates everything that depends on them.")
+        if st.button("← Back to dashboard"):
+            st.session_state.show_profile = False
+            st.rerun()
     with st.form("profile_setup_form"):
-        age = st.number_input("Age", min_value=18, max_value=100, value=28)
-        target_retirement_age = st.number_input("Target Retirement Age", min_value=40, max_value=80, value=60)
+        age = st.number_input("Age", min_value=18, max_value=100, value=int(_saved.get("age") or 28))
+        target_retirement_age = st.number_input(
+            "Target Retirement Age",
+            min_value=40,
+            max_value=80,
+            value=int(_saved.get("target_retirement_age") or 60),
+        )
         pay_period = st.selectbox("Fixed Pay Period", options=["Monthly", "Yearly"], index=0)
         pay_basis = st.selectbox(
             "Pay Entry Type",
@@ -1264,7 +1278,13 @@ if not st.session_state.user_profile or st.session_state.user_profile.get("age")
             min_value=0.0,
             value=0.0,
         )
-        income_type = st.selectbox("Income Type", options=["salaried", "freelance", "business"])
+        _income_types = ["salaried", "freelance", "business"]
+        _saved_income_type = _saved.get("income_type") or "salaried"
+        income_type = st.selectbox(
+            "Income Type",
+            options=_income_types,
+            index=_income_types.index(_saved_income_type) if _saved_income_type in _income_types else 0,
+        )
 
         annual_input = float(fixed_pay) if pay_period == "Yearly" else float(fixed_pay) * 12.0
         if pay_basis == "Before deductions (Gross)":
@@ -1284,7 +1304,7 @@ if not st.session_state.user_profile or st.session_state.user_profile.get("age")
             f"Planning monthly income set to ₹{monthly_income:,.0f}; "
             f"tax slab estimation uses gross annual income ₹{annual_gross_for_tax:,.0f}."
         )
-        if st.form_submit_button("Save Profile", use_container_width=True):
+        if st.form_submit_button("Save Profile" if _first_time_setup else "Save Changes", use_container_width=True):
             profile_payload = {
                 "age": age,
                 "target_retirement_age": target_retirement_age,
@@ -1295,15 +1315,30 @@ if not st.session_state.user_profile or st.session_state.user_profile.get("age")
             }
             saved = db.upsert_user_profile(st.session_state.user.id, profile_payload)
             st.session_state.user_profile = profile_payload
+            # The dashboard reads user_settings.salary, not user_profile.monthly_income,
+            # so setup has to write both or the dashboard stays empty until the user
+            # retypes their pay in the sidebar.
+            st.session_state.salary = monthly_income
+            db.sync_settings(
+                st.session_state.user.id,
+                monthly_income,
+                st.session_state.api_key,
+                st.session_state.selected_model,
+            )
             if saved:
                 st.success("Profile saved.")
             else:
                 st.warning("Profile stored for this session. Run DB migrations to persist user_profile.")
+            st.session_state.show_profile = False
             st.rerun()
     st.stop()
 
 # --- SIDEBAR - RICH CLASSIC DESIGN ---
 st.sidebar.title("💰 WealthOS v5")
+
+if st.sidebar.button("👤 Profile", use_container_width=True):
+    st.session_state.show_profile = True
+    st.rerun()
 
 # 1. 📣 Feedback Hub (Prioritized at Top)
 with st.sidebar.expander("📣 Report Bug / Suggest Idea", expanded=False):
