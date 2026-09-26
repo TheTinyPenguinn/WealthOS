@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -106,12 +107,15 @@ def _call_text_llm(
 
     client = Anthropic(api_key=selected_key)
     use_model = model or "claude-3-5-sonnet-latest"
-    response = client.messages.create(
-        model=use_model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": full_prompt}],
-    )
+    create_kwargs: dict[str, Any] = {
+        "model": use_model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": full_prompt}],
+    }
+    # anthropic 1.x removed temperature from messages.create().
+    if "temperature" in inspect.signature(client.messages.create).parameters:
+        create_kwargs["temperature"] = temperature
+    response = client.messages.create(**create_kwargs)
     if not response.content:
         return ""
     return "".join(block.text for block in response.content if getattr(block, "type", "") == "text").strip()

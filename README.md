@@ -1,31 +1,60 @@
-# 💰 WealthOS: The Personal CFO
+# 💰 WealthOS
 
-**WealthOS** is a privacy-first, desktop-based Financial Operating System. Unlike Mint or Monarch, it runs locally on your machine, keeps your data in local CSVs, and uses AI (Gemini) to act as a ruthless Strategic CFO for debt and surplus optimization.
+**An AI-native personal finance app for salaried Indian professionals** — built to prescribe one action, not to draw more pie charts.
 
-![Status](https://img.shields.io/badge/Status-Alpha-orange) ![Stack](https://img.shields.io/badge/Stack-Python_Streamlit-blue)
+Most finance apps classify spending and leave you to work out what to do. WealthOS is an experiment in the opposite: reason across income, debt and investments, and say what to do next — pause a SIP, clear the 36% card first, hold the surplus.
 
-## 🚀 Why WealthOS?
-* **Privacy First:** Your bank data never leaves your laptop (Local CSV storage).
-* **AI CFO:** A customized AI agent that analyzes "Burn Rate," "Runway," and "Debt Arbitrage."
-* **Zero-Install Sharing:** Can be compiled into a single `.exe` file.
+🔗 **Live app:** [wealthos.streamlit.app](https://wealthos.streamlit.app)
 
-## 🛠️ Installation (For Developers)
-If you want to modify the code or run it from source:
+![Status](https://img.shields.io/badge/Status-MVP%20%2F%20experimental-orange) ![Stack](https://img.shields.io/badge/Stack-Python%20%C2%B7%20Streamlit%20%C2%B7%20Supabase-blue)
 
-### 1. Prerequisites
-* **Python 3.10+** (Make sure to "Add to PATH" during install).
-* **Gemini API Key** (Get a free key from Google AI Studio).
+> **Status: early MVP, built solo.** It works end to end and is deployed, but it's a personal experiment rather than a finished product, and parts of it are mid-rebuild. Treat it as a prototype for the product thinking in [`docs/`](docs/), not a bank-grade tool.
 
-### 2. Setup
+## What it does today
+
+- **Unified ledger** — accounts, fixed costs, obligations, investments and expenses in one place
+- **Imports** — bank statement CSVs, Zerodha exports, and receipt/statement parsing
+- **AI CFO** — an LLM agent with tool access that reasons over your actual numbers (debt cost vs. expected return, surplus, runway)
+- **Tax** — 80C tracking, old vs. new regime comparison, capital gains, a CA-ready export
+- **Insurance** — policy inventory, coverage gaps, endowment-trap detection
+- **Goals** — emergency-fund ring-fencing, goal sequencing, and a "freedom score"
+
+## Stack
+
+Python · Streamlit (UI) · Supabase (auth + Postgres) · pandas/plotly · a switchable LLM layer (Gemini, OpenAI or Anthropic)
+
+## Run it locally
+
 ```bash
-# Clone the repo
-git clone [https://github.com/YOUR_USERNAME/WealthOS.git](https://github.com/YOUR_USERNAME/WealthOS.git)
+git clone https://github.com/TheTinyPenguinn/WealthOS.git
 cd WealthOS
 
-# Create Virtual Environment
-python -m venv venv
-# Windows: venv\Scripts\activate
-# Mac/Linux: source venv/bin/activate
-
-# Install Dependencies
+python3 -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+
+cp .env.example .env    # then fill it in, see below
+streamlit run app/app.py
+```
+
+`.env` needs your own Supabase project and one LLM key:
+
+```
+SUPABASE_URL=https://<your-project>.supabase.co
+SUPABASE_ANON_KEY=<your anon key>
+LLM_PROVIDER=gemini          # gemini | openai | anthropic
+GEMINI_API_KEY=<your key>    # or OPENAI_API_KEY / ANTHROPIC_API_KEY
+```
+
+On a fresh Supabase project, run `supabase_migrations/migrations/001_wealthos_phase_tables.sql` once in the Supabase SQL editor to create the tables.
+
+## Product thinking
+
+The interesting part of this project isn't the code — it's the attempt to rebuild it properly, one phase at a time, writing the spec before the implementation:
+
+- [`docs/PRD.md`](docs/PRD.md) — the master plan and phase tracker
+- [`docs/prds/00-onboarding.md`](docs/prds/00-onboarding.md) — a full PRD for the onboarding rebuild
+- [`docs/EGM_PLAYBOOK.md`](docs/EGM_PLAYBOOK.md) — the design process used to produce it
+
+## Known gaps
+
+Documented honestly in [`docs/CODEBASE_AUDIT.md`](docs/CODEBASE_AUDIT.md) and the PRD: v1's onboarding collects more than it uses, some inputs aren't persisted, transaction categorisation is unreliable, and row-level security isn't switched on yet. Fixing these is what the phased rebuild is for.

@@ -152,7 +152,5 @@ create index if not exists transactions_user_id_idx on public.transactions (user
 grant usage on schema public to postgres, anon, authenticated, service_role;
 
 grant select, insert, update, delete on all tables in schema public to authenticated, service_role;
-grant select, insert, update, delete on all tables in schema public to anon;
 
 grant usage, select on all sequences in schema public to authenticated, service_role;
-grant usage, select on all sequences in schema public to anon;
