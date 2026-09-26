@@ -1841,18 +1841,35 @@ with tab1:
             st.error(f"Missing provider key: {env_key_name}")
         else:
             st.session_state.cfo_chat_messages.append({"role": "user", "content": prompt})
-            with st.spinner("CFO is thinking..."):
-                reply, tool_events = run_agent_with_trace(
-                    prompt, user_id, db.supabase, **_llm_runtime_kwargs()
+            try:
+                with st.spinner("CFO is thinking..."):
+                    reply, tool_events = run_agent_with_trace(
+                        prompt, user_id, db.supabase, **_llm_runtime_kwargs()
+                    )
+            except Exception as exc:
+                # Drop the orphaned question so the transcript doesn't show it unanswered.
+                st.session_state.cfo_chat_messages.pop()
+                detail = str(exc)
+                if "API_KEY_INVALID" in detail or "API key not valid" in detail:
+                    st.error(
+                        "The AI provider rejected the API key. Paste a current key into "
+                        "AI Settings below, or clear the field to use the app's own key."
+                    )
+                elif "NOT_FOUND" in detail or "is not found" in detail:
+                    st.error(
+                        "That model isn't available for this API key. Pick another one in AI Settings."
+                    )
+                else:
+                    st.error(f"The AI call failed: {detail[:200]}")
+            else:
+                st.session_state.cfo_chat_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": reply,
+                        "tool_events": tool_events,
+                    }
                 )
-            st.session_state.cfo_chat_messages.append(
-                {
-                    "role": "assistant",
-                    "content": reply,
-                    "tool_events": tool_events,
-                }
-            )
-            st.rerun()
+                st.rerun()
 
     st.divider()
 

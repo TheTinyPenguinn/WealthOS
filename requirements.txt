@@ -1,16 +1,26 @@
-streamlit
-pandas
-numpy
-plotly
-yfinance
-# LLM backends (match LLM_PROVIDER in .env — install the one(s) you use)
-google-generativeai
-openai
-anthropic
-langfuse
-supabase
-gotrue
-openpyxl
-python-dateutil
-watchdog
-reportlab
+# Pinned deliberately. Streamlit Cloud reinstalls these on every deploy, so an
+# unpinned list means a dependency can upgrade underneath a running app and break
+# it with no code change — which is exactly how pandas removing Styler.applymap
+# took down every tab. Bump these on purpose, then redeploy and check.
+
+streamlit==1.53.0
+pandas==2.3.3
+numpy==2.4.1
+plotly==6.5.2
+yfinance==1.0
+certifi==2026.1.4
+
+# LLM backends (match LLM_PROVIDER in .env — install the one(s) you use).
+# google-genai replaces google-generativeai, which Google has discontinued.
+google-genai==2.25.0
+openai==3.13.0
+anthropic==1.5.0
+langfuse==4.15.2
+
+supabase==2.31.0
+gotrue==2.12.4
+
+openpyxl==3.1.5
+python-dateutil==2.9.0.post0
+watchdog==6.0.0
+reportlab==5.0.1

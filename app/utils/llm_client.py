@@ -70,15 +70,15 @@ def _call_text_llm(
 
     if selected_provider == "gemini":
         try:
-            import google.generativeai as genai
+            from google import genai
         except ImportError as e:
             raise RuntimeError(
-                "Missing package `google-generativeai`. Run: pip install google-generativeai"
+                "Missing package `google-genai`. Run: pip install google-genai"
             ) from e
 
-        genai.configure(api_key=selected_key)
+        client = genai.Client(api_key=selected_key)
         use_model = model or "gemini-2.0-flash"
-        response = genai.GenerativeModel(use_model).generate_content(full_prompt)
+        response = client.models.generate_content(model=use_model, contents=full_prompt)
         return (response.text or "").strip()
 
     if selected_provider == "openai":
@@ -199,16 +199,18 @@ def call_vision(
 
     if selected_provider == "gemini":
         try:
-            import google.generativeai as genai
+            from google import genai
+            from google.genai import types
         except ImportError as e:
             raise RuntimeError(
-                "Missing package `google-generativeai`. Run: pip install google-generativeai"
+                "Missing package `google-genai`. Run: pip install google-genai"
             ) from e
 
-        genai.configure(api_key=selected_key)
+        client = genai.Client(api_key=selected_key)
         use_model = model or "gemini-2.0-flash"
-        response = genai.GenerativeModel(use_model).generate_content(
-            [prompt, {"mime_type": mime_type, "data": image_bytes}]
+        response = client.models.generate_content(
+            model=use_model,
+            contents=[prompt, types.Part.from_bytes(data=image_bytes, mime_type=mime_type)],
         )
         return (response.text or "").strip()
 
