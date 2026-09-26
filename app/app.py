@@ -1820,7 +1820,9 @@ with tab1:
     # ROW 4 — AI CFO Chat
     st.subheader("AI CFO Chat")
     if "cfo_chat_messages" not in st.session_state:
-        st.session_state.cfo_chat_messages = []
+        # Reloads sign the user out, so without this every conversation is a
+        # one-off and past answers can't be checked against the numbers.
+        st.session_state.cfo_chat_messages = db.load_chat_messages(user_id)
 
     for msg in st.session_state.cfo_chat_messages:
         with st.chat_message(msg["role"]):
@@ -1880,6 +1882,10 @@ with tab1:
                         "tool_events": tool_events,
                     }
                 )
+                # Persist only once the exchange succeeded, so a failed call
+                # never leaves a question stored with no answer beside it.
+                db.save_chat_message(user_id, "user", prompt)
+                db.save_chat_message(user_id, "assistant", reply, tool_events)
                 st.rerun()
 
     st.divider()

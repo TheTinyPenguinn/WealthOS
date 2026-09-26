@@ -571,6 +571,58 @@ def upsert_user_profile(user_id, profile: dict):
         )
         return False
 
+def load_chat_messages(user_id, limit: int = 50):
+    """The most recent CFO chat turns, oldest first.
+
+    Never fatal: if the history table is missing or unreachable the chat simply
+    starts empty, exactly as it behaved before history existed.
+    """
+    try:
+        res = (
+            supabase.table("cfo_chat_messages")
+            .select("role, content, tool_events")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = list(reversed(res.data or []))
+    except Exception:
+        return []
+    return [
+        {
+            "role": row.get("role") or "assistant",
+            "content": row.get("content") or "",
+            "tool_events": row.get("tool_events") or [],
+        }
+        for row in rows
+    ]
+
+
+def save_chat_message(user_id, role: str, content: str, tool_events=None) -> bool:
+    """Append one turn. Returns False instead of raising if history is unavailable."""
+    import json
+
+    try:
+        # tool_events carries whatever the agent produced; force it through JSON
+        # so an odd object can never break the insert.
+        safe_events = json.loads(json.dumps(tool_events or [], default=str))
+    except Exception:
+        safe_events = []
+    try:
+        supabase.table("cfo_chat_messages").insert(
+            {
+                "user_id": user_id,
+                "role": role,
+                "content": content or "",
+                "tool_events": safe_events,
+            }
+        ).execute()
+        return True
+    except Exception:
+        return False
+
+
 def load_tax_investments(user_id, financial_year):
     """Load tax investments for a financial year."""
     try:
