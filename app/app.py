@@ -261,10 +261,7 @@ if st.session_state.user is None:
             new_password = st.text_input("Password", type="password")
             if st.form_submit_button("Sign Up", use_container_width=True):
                 try:
-                    db.signup_user(new_email, new_password)
-                    res = db.supabase.auth.sign_in_with_password(
-                        {"email": new_email, "password": new_password}
-                    )
+                    res = db.signup_user(new_email, new_password)
                     st.session_state.user = res.user
                     st.rerun()
                 except Exception as e:
