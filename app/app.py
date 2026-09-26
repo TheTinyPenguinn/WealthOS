@@ -1707,43 +1707,112 @@ with tab1:
         st.metric("Covered without income", f"{runway_months:.1f} months")
         st.caption("How long your savings would last if pay stopped.")
 
-    with st.expander("What you own, minus what you owe", expanded=False):
-        own1, own2, own3 = st.columns(3)
-        own1.metric("Cash and investments", f"₹{liquid_net_worth:,.0f}")
-        own2.metric("Owed on loans and cards", f"₹{total_debt:,.0f}")
-        own3.metric("Spending each month", f"₹{true_burn:,.0f}")
+    # What to do next, stated before the evidence for it. Previously the alerts
+    # sat at the bottom of the page, under the charts and the chat.
+    _, _revolving_cost, _apr_badges = get_credit_card_intelligence()
+    _ef = get_ef_status(user_id, db.supabase)
+    if monthly_pay <= 0:
+        next_action = "Add your monthly pay in Profile — nothing here can be worked out without it."
+    elif surplus < 0:
+        next_action = (
+            f"Close the ₹{abs(surplus):,.0f} monthly gap before anything else. "
+            "Everything below assumes money is coming in, not going out."
+        )
+    elif _apr_badges:
+        next_action = (
+            f"Clear the high-interest card debt first — it's costing about "
+            f"₹{_revolving_cost:,.0f} a month, more than any investment is likely to earn."
+        )
+    elif _ef.get("status", "building") == "building":
+        months_short = max(0.0, 6.0 - runway_months)
+        next_action = (
+            f"Put this month's ₹{surplus:,.0f} toward your emergency fund — you're about "
+            f"{months_short:.1f} months short of six months' cover."
+        )
+    else:
+        next_action = (
+            f"Your safety net is covered, so this month's ₹{surplus:,.0f} can go to "
+            "long-term investing rather than sitting in the bank."
+        )
+    st.info(f"**Do this next** — {next_action}")
 
     st.divider()
 
-    # ROW 2 — Status strip
+    # Where the money actually goes each month, as proportions of pay rather
+    # than four unrelated figures the reader has to mentally reconcile.
+    st.subheader("Where your money goes each month")
+    if monthly_pay > 0:
+        variable_spend = max(0.0, safe_float(true_burn) - committed)
+        leftover = max(0.0, monthly_pay - committed - variable_spend)
+        rows = [
+            ("Rent, bills and EMIs", committed, "Fixed commitments you can't skip"),
+            ("Day-to-day spending", variable_spend, "Food, travel, shopping and the rest"),
+            ("Left over", leftover, "What's available to save or invest"),
+        ]
+        for label, amount, explain in rows:
+            share = amount / monthly_pay if monthly_pay > 0 else 0.0
+            st.progress(
+                min(max(share, 0.0), 1.0),
+                text=f"{label} — ₹{amount:,.0f}  ({share * 100:.0f}% of pay)",
+            )
+            st.caption(explain)
+    else:
+        st.caption("Add your monthly pay in Profile to see this breakdown.")
+
+    st.divider()
+
+    st.subheader("What you own, minus what you owe")
+    own1, own2, own3 = st.columns(3)
+    with own1:
+        st.metric("Cash and investments", f"₹{liquid_net_worth:,.0f}")
+        st.caption("Everything you could reach quickly if you had to.")
+    with own2:
+        st.metric("Owed on loans and cards", f"₹{total_debt:,.0f}")
+        st.caption("What you'd still have to pay off.")
+    with own3:
+        st.metric("Spending each month", f"₹{true_burn:,.0f}")
+        st.caption("Your typical monthly outgoings.")
+
+    st.divider()
+
+    # ROW 2 — Status strip. Every label used to be shorthand only the author
+    # understood: "EF", "80C", "High-APR", "Insurance Coverage %".
+    st.subheader("Where you're exposed")
     s1, s2, s3, s4 = st.columns(4)
-    ef_status = get_ef_status(user_id, db.supabase)
+    ef_status = _ef
     with s1:
         status_label = ef_status.get("status", "building").upper()
         if status_label == "BUILDING":
-            st.error(f"EF: {status_label}")
+            st.error("Emergency fund: still building")
         elif status_label == "ADEQUATE":
-            st.warning(f"EF: {status_label}")
+            st.warning("Emergency fund: about enough")
         else:
-            st.success(f"EF: {status_label}")
+            st.success("Emergency fund: comfortable")
+        st.caption("Savings set aside for a job loss or a crisis.")
     with s2:
         ded = get_deductions_summary(user_id, current_financial_year(), db.supabase)
         ratio_80c = ded["s80c"]["invested"] / max(float(ded["s80c"]["limit"]), 1.0)
-        st.progress(min(ratio_80c, 1.0), text=f"80C: ₹{ded['s80c']['invested']:,.0f} / ₹{ded['s80c']['limit']:,.0f}")
+        st.progress(
+            min(ratio_80c, 1.0),
+            text=f"Tax-saving used: ₹{ded['s80c']['invested']:,.0f} of ₹{ded['s80c']['limit']:,.0f}",
+        )
+        st.caption("Section 80C lets you cut taxable income by investing.")
     with s3:
-        _, revolving_cost, apr_badges = get_credit_card_intelligence()
+        revolving_cost, apr_badges = _revolving_cost, _apr_badges
         if apr_badges:
-            st.error("High-APR debt alert")
-            st.caption(f"Revolving cost: ₹{revolving_cost:,.0f}/mo")
+            st.error("Expensive debt")
+            st.caption(f"Costing about ₹{revolving_cost:,.0f} a month in interest.")
         else:
-            st.success("No high-APR alert")
+            st.success("No expensive debt")
+            st.caption("Nothing running at a high interest rate.")
     with s4:
         life_audit = audit_life_cover(user_id, db.supabase)
         health_audit = audit_health_cover(user_id, db.supabase)
         life_cov = 1.0 if life_audit["recommended"] <= 0 else min(life_audit["actual"] / life_audit["recommended"], 1.0)
         health_cov = min(health_audit["actual"] / max(health_audit["recommended"], 1.0), 1.0)
         coverage = (life_cov + health_cov) / 2.0
-        st.progress(coverage, text=f"Insurance Coverage: {int(coverage * 100)}%")
+        st.progress(coverage, text=f"Insured for {int(coverage * 100)}% of what's suggested")
+        st.caption("Life and health cover, against a rule-of-thumb target.")
 
     st.divider()
 
