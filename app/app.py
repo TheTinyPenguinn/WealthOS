@@ -20,7 +20,13 @@ if str(PROJECT_ROOT) not in sys.path:
 # package pointing to the app directory.
 existing_app = sys.modules.get("app")
 if existing_app is not None and not hasattr(existing_app, "__path__"):
-    del sys.modules["app"]
+    # Streamlit has bound `app` to this script rather than the package. Drop it —
+    # and drop every submodule imported against it, because they hold a reference
+    # to the old parent. Leaving them behind breaks a redeploy two ways: the next
+    # `from app...` import raises KeyError mid-reload, and the stale modules keep
+    # serving the previous deploy's code even though the files on disk are new.
+    for stale in [n for n in sys.modules if n == "app" or n.startswith("app.")]:
+        del sys.modules[stale]
 if "app" not in sys.modules:
     pkg = types.ModuleType("app")
     pkg.__path__ = [str(APP_DIR)]  # namespace package path
