@@ -51,7 +51,6 @@ from app.tax.regime_compare import compare_regimes
 from app.tax.capital_gains import get_harvesting_alerts
 from app.insurance.audit import audit_life_cover, audit_health_cover, detect_endowment_traps
 from app.goals.sequencer import get_ef_status, allocate_surplus
-from app.scoring.freedom_score import calculate_freedom_score
 from ai.agent import run_agent, run_agent_with_trace
 
 # Fix SSL certificate issues for yfinance on Mac
@@ -1667,14 +1666,6 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📊 Dashboard", "💸 Tran
 
 with tab1:
     user_id = st.session_state.user.id
-    score_cache_key = "freedom_score_cache"
-    score_user_key = "freedom_score_cache_user"
-    if score_cache_key not in st.session_state or st.session_state.get(score_user_key) != user_id:
-        st.session_state[score_cache_key] = calculate_freedom_score(user_id, db.supabase)
-        st.session_state[score_user_key] = user_id
-    freedom = st.session_state[score_cache_key]
-    score_value = int(freedom.get("total_score", 0))
-    score_tier = freedom.get("tier", "Building")
 
     net_worth, liquid_net_worth, total_debt, total_portfolio, true_burn, surplus_margin, surplus, monthly_interest_burn, avg_interest, rsu_real_value, monthly_floor, total_emi, csv_variable_spend, unexpected_needs, illiquid_net = calculate_metrics(
         st.session_state.expenses,
@@ -1682,61 +1673,51 @@ with tab1:
         st.session_state.accounts,
     )
 
-    # 30-day Freedom Score sparkline
-    score_history = []
-    try:
-        score_res = (
-            db.supabase.table("score_history")
-            .select("date,score")
-            .eq("user_id", user_id)
-            .order("date")
-            .execute()
-        )
-        score_history = score_res.data or []
-    except Exception:
-        score_history = []
-    if score_history:
-        score_df = pd.DataFrame(score_history)
-        score_df["date"] = pd.to_datetime(score_df["date"], errors="coerce")
-        cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
-        score_df = score_df[score_df["date"] >= cutoff].sort_values("date")
-        if not score_df.empty:
-            st.caption("Freedom Score (30-day trend)")
-            st.line_chart(score_df.set_index("date")["score"], height=100)
+    # ROW 1 — Where you stand, in words a person actually uses.
+    # This replaced a "Freedom Score" out of 1000 built from arbitrary weights,
+    # scored partly on forms the user hadn't filled in and on tabs that no longer
+    # exist. A number nobody can interpret is not a summary, and "runway" and
+    # "tax efficiency" are not how anyone thinks about their own money.
+    runway_months = (liquid_net_worth / true_burn) if true_burn > 0 else 0.0
+    monthly_pay = safe_float(st.session_state.get("salary", 0.0))
+    committed = safe_float(monthly_floor) + safe_float(total_emi)
+    safe_to_spend = max(0.0, monthly_pay - committed - max(0.0, surplus))
 
-    # ROW 1 — Hero
-    hero_left, hero_right = st.columns([2.2, 1.0])
-    with hero_left:
-        st.markdown(
-            f"<h1 style='margin-bottom:0'>Freedom Score: {score_value}</h1>"
-            f"<span class='tier-badge'>{score_tier}</span>",
-            unsafe_allow_html=True,
+    if monthly_pay <= 0:
+        headline = "Add your monthly pay in Profile and this page fills in."
+    elif surplus <= 0:
+        headline = (
+            f"You're spending about ₹{abs(surplus):,.0f} more than you earn each month. "
+            "That gap is the first thing to close."
         )
-        weights = {
-            "savings": 250.0,
-            "debt_freedom": 200.0,
-            "runway": 200.0,
-            "tax_efficiency": 150.0,
-            "insurance": 100.0,
-            "goals": 100.0,
-        }
-        labels = {
-            "savings": "Savings",
-            "debt_freedom": "Debt Freedom",
-            "runway": "Runway",
-            "tax_efficiency": "Tax Efficiency",
-            "insurance": "Insurance",
-            "goals": "Goal Progress",
-        }
-        for key, max_points in weights.items():
-            points = float(freedom.get("breakdown", {}).get(key, 0))
-            st.progress(min(max(points / max_points, 0.0), 1.0), text=f"{labels[key]}: {int(points)} / {int(max_points)}")
+    elif runway_months >= 6:
+        headline = (
+            f"You keep about ₹{surplus:,.0f} of every month's pay, and your savings would "
+            f"cover roughly {runway_months:.0f} months without any income."
+        )
+    else:
+        headline = (
+            f"You keep about ₹{surplus:,.0f} a month, but your savings would only cover "
+            f"{runway_months:.1f} months without income. Building that up comes first."
+        )
+    st.markdown(f"### {headline}")
 
-    with hero_right:
-        st.metric("Liquid Net Worth", f"₹{liquid_net_worth:,.0f}")
-        st.metric("Monthly Surplus", f"₹{surplus:,.0f}")
-        runway_months = (liquid_net_worth / true_burn) if true_burn > 0 else 0.0
-        st.metric("Runway", f"{runway_months:.1f} months")
+    plain1, plain2, plain3 = st.columns(3)
+    with plain1:
+        st.metric("Free to spend this month", f"₹{safe_to_spend:,.0f}")
+        st.caption("After rent, bills, EMIs and what you're setting aside.")
+    with plain2:
+        st.metric("Left over each month", f"₹{surplus:,.0f}")
+        st.caption("Pay in, minus everything going out.")
+    with plain3:
+        st.metric("Covered without income", f"{runway_months:.1f} months")
+        st.caption("How long your savings would last if pay stopped.")
+
+    with st.expander("What you own, minus what you owe", expanded=False):
+        own1, own2, own3 = st.columns(3)
+        own1.metric("Cash and investments", f"₹{liquid_net_worth:,.0f}")
+        own2.metric("Owed on loans and cards", f"₹{total_debt:,.0f}")
+        own3.metric("Spending each month", f"₹{true_burn:,.0f}")
 
     st.divider()
 
