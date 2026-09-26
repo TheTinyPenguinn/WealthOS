@@ -1640,23 +1640,17 @@ if st.sidebar.button("🚪 Logout", use_container_width=True, key="sidebar_logou
     handle_logout()
 
 st.sidebar.caption("☁️ WealthOS Cloud Connection Active")
+st.sidebar.caption(
+    f"🔒 Your data stays in your own Supabase project. Only the figures needed for a "
+    f"question are sent to the AI provider ({_resolved_llm_provider().title()})."
+)
 
 # --- MAIN PAGE - TABBED LAYOUT ---
 st.title("WealthOS")
-m1, m2, m3, m4 = st.columns(4)
-with m1:
-    st.metric("Transactions", f"{len(st.session_state.expenses):,}")
-with m2:
-    st.metric("Accounts", f"{len(st.session_state.accounts):,}")
-with m3:
-    st.metric("Investments", f"{len(st.session_state.investments):,}")
-with m4:
-    prov = _resolved_llm_provider()
-    st.metric("AI provider", prov.title())
-st.info(
-    "🔒 Privacy notice: your financial data stays in your Supabase project. "
-    "Only the minimum required context is sent to AI calls."
-)
+# The four counters that used to sit here reported table sizes — transactions,
+# accounts, investments, AI provider — none of which tell anyone anything about
+# their money, while pushing the actual answer below the fold. The privacy note
+# moved to the sidebar: still one glance away, no longer the first thing read.
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📊 Dashboard", "💸 Transactions", "📈 Investments", "🤖 AI Brain", "🧾 Tax", "🛡️ Insurance", "🎯 Goals"])
 
