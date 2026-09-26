@@ -213,9 +213,7 @@ assert "st.session_state.credit_cards" in app_text
 assert "with tab5:" in app_text
 assert "get_deductions_summary" in app_text
 assert "compare_regimes" in app_text
-assert "generate_ca_export_pdf" in app_text
 assert "get_harvesting_alerts" in app_text
-assert "Capital Gains" in app_text
 assert "tab6" in app_text
 assert "Insurance" in app_text
 assert "detect_endowment_traps" in app_text

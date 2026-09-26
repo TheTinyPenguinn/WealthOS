@@ -37,13 +37,12 @@ import certifi
 import db  # Supabase integration
 from app.data_providers.amfi import get_nav
 from app.data_providers.fx import get_usd_inr
-from app.utils.llm_client import call_llm, call_vision
+from app.utils.llm_client import call_llm
 from app.utils.bank_statement_csv import parse_bank_statement_csv_from_bytes
 from app.ingestion.ocr_parser import parse_file, confirm_and_save
 from app.tax.deductions import get_deductions_summary, get_80c_alert, current_financial_year
 from app.tax.regime_compare import compare_regimes
-from app.tax.ca_export import generate_ca_export_pdf
-from app.tax.capital_gains import get_gains_summary, get_unrealised, get_harvesting_alerts
+from app.tax.capital_gains import get_harvesting_alerts
 from app.insurance.audit import audit_life_cover, audit_health_cover, detect_endowment_traps
 from app.goals.sequencer import get_ef_status, allocate_surplus
 from app.scoring.freedom_score import calculate_freedom_score
@@ -321,7 +320,11 @@ if not st.session_state.data_loaded:
             secrets_api_key = _get_secret_or_env(provider_env_key)
             st.session_state.api_key = db_api_key if db_api_key else secrets_api_key
             
-            st.session_state.selected_model = settings.get("selected_model", "gemini-1.5-flash")
+            _stored_model = settings.get("selected_model") or "gemini-2.0-flash"
+            # gemini-1.5-* were retired by the API; a stored one fails every call
+            if _stored_model.startswith("gemini-1.5"):
+                _stored_model = "gemini-2.0-flash"
+            st.session_state.selected_model = _stored_model
             
             st.session_state.data_loaded = True
             st.rerun()
@@ -1896,27 +1899,7 @@ with tab2:
         st.info("👋 Welcome! Add your first transaction in Quick Entry menu to see your spending log.")
 
     st.subheader("Add Transactions")
-    ocr_tab1, ocr_tab2, ocr_tab3 = st.tabs(["Receipt Photo", "PDF Statement", "Manual Entry"])
-
-    with ocr_tab1:
-        receipt_file = st.file_uploader(
-            "Upload receipt photo",
-            type=["png", "jpg", "jpeg", "webp"],
-            key="ocr_receipt_upload",
-        )
-        if receipt_file is not None and st.button("Parse Receipt", use_container_width=True, key="parse_receipt_btn"):
-            with st.spinner("Parsing with AI..."):
-                parsed_rows = parse_file(
-                    file_bytes=receipt_file.getvalue(),
-                    mime_type=receipt_file.type or "image/jpeg",
-                    user_id=str(st.session_state.user.id),
-                    supabase=db.supabase,
-                )
-                st.session_state.ocr_transactions = parsed_rows
-                if parsed_rows:
-                    st.success(f"Parsed {len(parsed_rows)} transactions")
-                else:
-                    st.warning("No transactions found from this receipt.")
+    ocr_tab2, ocr_tab3 = st.tabs(["PDF Statement", "Manual Entry"])
 
     with ocr_tab2:
         pdf_file = st.file_uploader(
@@ -2323,8 +2306,8 @@ with tab3:
                 color = 'green' if val >= 0 else 'red'
                 return f'color: {color}'
             
-            styled_df = display_portfolio.style.applymap(
-                color_pl, 
+            styled_df = display_portfolio.style.map(
+                color_pl,
                 subset=['P/L']
             ).format({
                 'Avg Price': '₹{:.2f}',
@@ -2393,13 +2376,13 @@ with tab4:
                     call_llm(
                         "Reply with OK.",
                         system_prompt=risk_system_prompt,
-                        model=st.session_state.get("selected_model", "gemini-1.5-flash"),
+                        model=st.session_state.get("selected_model", "gemini-2.0-flash"),
                         api_key=st.session_state.api_key,
                         provider=provider,
                         max_tokens=32,
                     )
                     default_models = {
-                        "gemini": ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"],
+                        "gemini": ["gemini-2.0-flash"],
                         "openai": ["gpt-4o-mini", "gpt-4o", "o4-mini"],
                         "anthropic": ["claude-3-5-haiku-latest", "claude-3-5-sonnet-latest"],
                     }
@@ -2464,338 +2447,53 @@ with tab4:
 # ============================================================================
 
 with tab5:
-    st.header("🧾 Tax Engine")
-
-    fy_current = current_financial_year()
-    start_year = int(fy_current.split("-")[0])
-    fy_options = [f"{start_year - i}-{start_year - i + 1}" for i in range(0, 4)]
-    selected_fy = st.selectbox("Financial Year", fy_options, index=0, key="tax_fy_picker")
-
-    if st.session_state.tax_fy_loaded != selected_fy:
-        st.session_state.tax_investments = db.load_tax_investments(st.session_state.user.id, selected_fy)
-        st.session_state.tax_fy_loaded = selected_fy
-
-    summary = get_deductions_summary(st.session_state.user.id, selected_fy, db.supabase)
-    gross_income = float(st.session_state.user_profile.get("monthly_income") or st.session_state.get("salary", 0.0)) * 12
-    regime_result = compare_regimes(
-        gross_income=gross_income,
-        deductions={
-            "s80c_invested": summary["s80c"]["invested"],
-            "s_nps_invested": summary["s_nps"]["invested"],
-            "s80d_total": summary["s80d"]["total"],
-        },
+    st.header("\U0001F9FE Tax")
+    st.info("Not built yet \u2014 this tab is a placeholder for where tax work is headed.")
+    st.markdown(
+        "**On the roadmap**\n\n"
+        "- Old vs new regime compared from your actual salary and declared investments\n"
+        "- 80C / 80D / NPS tracked against their limits, showing what is still unused\n"
+        "- Capital gains from your holdings, short vs long term, and harvesting opportunities\n"
+        "- RSU and ESOP treatment, where most salaried confusion actually lives\n"
+        "- An export a CA can work from directly\n\n"
+        "The question this tab has to answer before any of it ships: where does useful "
+        "tax education end and regulated advice begin? The intent is to explain and hand "
+        "off to a CA, not to file on your behalf."
     )
 
-    gains_summary = get_gains_summary(st.session_state.user.id, selected_fy, db.supabase)
-    unrealised_positions = get_unrealised(st.session_state.user.id, db.supabase)
-    harvesting_alerts = get_harvesting_alerts(st.session_state.user.id, db.supabase)
-
-    tax_tab1, tax_tab2, tax_tab3, tax_tab4 = st.tabs(["80C Dashboard", "Regime Comparison", "CA Export", "Capital Gains"])
-
-    with tax_tab1:
-        alert = get_80c_alert(st.session_state.user.id, db.supabase)
-        if alert:
-            st.warning(alert)
-
-        p1, p2 = st.columns(2)
-        with p1:
-            st.metric("Section 80C Invested", f"₹{summary['s80c']['invested']:,.0f}")
-            st.progress(
-                min(1.0, summary["s80c"]["invested"] / max(1, summary["s80c"]["limit"])),
-                text=f"80C Progress: ₹{summary['s80c']['invested']:,.0f} / ₹{summary['s80c']['limit']:,.0f}",
-            )
-            st.caption(f"80C Gap: ₹{summary['s80c']['gap']:,.0f}")
-        with p2:
-            st.metric("NPS 80CCD(1B) Invested", f"₹{summary['s_nps']['invested']:,.0f}")
-            st.progress(
-                min(1.0, summary["s_nps"]["invested"] / max(1, summary["s_nps"]["limit"])),
-                text=f"NPS Progress: ₹{summary['s_nps']['invested']:,.0f} / ₹{summary['s_nps']['limit']:,.0f}",
-            )
-            st.caption(f"NPS Gap: ₹{summary['s_nps']['gap']:,.0f}")
-
-        st.info(f"Tax saving potential (approx): ₹{summary['tax_saving_potential']:,.0f}")
-
-        edited_tax = st.data_editor(
-            st.session_state.tax_investments,
-            use_container_width=True,
-            num_rows="dynamic",
-            column_config={
-                "Instrument Type": st.column_config.SelectboxColumn(
-                    "Instrument Type",
-                    options=[
-                        "epf",
-                        "ppf",
-                        "elss",
-                        "nsc",
-                        "tax_saver_fd",
-                        "life_insurance_premium",
-                        "home_loan_principal",
-                        "nps_80ccd1b",
-                        "health_insurance_self",
-                        "health_insurance_parents",
-                        "other_80c",
-                    ],
-                    required=True,
-                ),
-                "Amount Invested": st.column_config.NumberColumn("Amount Invested (₹)", format="₹%.2f", min_value=0.0),
-                "Notes": st.column_config.TextColumn("Notes"),
-            },
-            hide_index=True,
-            key="tax_investments_editor",
-        )
-        st.session_state.tax_investments = edited_tax
-
-        if st.button("Save Deductions", type="primary", use_container_width=True, key="tax_save_deductions"):
-            db.sync_tax_investments(st.session_state.user.id, selected_fy, st.session_state.tax_investments)
-            st.success("Deductions saved.")
-            st.rerun()
-
-    with tax_tab2:
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("Old Regime Tax", f"₹{regime_result['old_tax']:,.0f}")
-        with c2:
-            st.metric("New Regime Tax", f"₹{regime_result['new_tax']:,.0f}")
-
-        rec = regime_result["recommended"]
-        if rec == "old":
-            st.success(f"Recommended: OLD regime | Savings: ₹{regime_result['saving']:,.0f}")
-        else:
-            st.success(f"Recommended: NEW regime | Savings: ₹{regime_result['saving']:,.0f}")
-
-    with tax_tab3:
-        st.caption("Generate CA-ready PDF summary for selected FY.")
-        user_label = getattr(st.session_state.user, "email", "user")
-        if st.button("Generate CA Export", use_container_width=True, key="tax_generate_ca_export"):
-            try:
-                pdf_bytes = generate_ca_export_pdf(
-                    fy=selected_fy,
-                    user=user_label,
-                    deductions_df=st.session_state.tax_investments,
-                    summary=summary,
-                    regime_result=regime_result,
-                    gains_summary=gains_summary,
-                )
-                st.download_button(
-                    "Download Tax Summary PDF",
-                    data=pdf_bytes,
-                    file_name=f"wealthos_tax_summary_{selected_fy}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
-            except Exception as e:
-                st.error(f"Failed to generate PDF export: {e}")
-
-    with tax_tab4:
-        g1, g2, g3 = st.columns(3)
-        with g1:
-            st.metric("Total LTCG", f"₹{gains_summary['total_ltcg']:,.0f}")
-        with g2:
-            st.metric("Total STCG", f"₹{gains_summary['total_stcg']:,.0f}")
-        with g3:
-            st.metric("Tax Owed", f"₹{gains_summary['total_tax']:,.0f}")
-
-        for alert in harvesting_alerts:
-            st.warning(alert, icon="⚠️")
-
-        if unrealised_positions:
-            st.markdown("#### Unrealised Positions")
-            st.dataframe(
-                pd.DataFrame(unrealised_positions),
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.info("No unrealised positions found.")
-
-        st.markdown("#### Add Position")
-        with st.form("add_capital_position_form", clear_on_submit=True):
-            cg_asset_name = st.text_input("Asset Name")
-            cg_asset_type = st.selectbox(
-                "Asset Type",
-                options=["equity_mf", "debt_mf", "stock", "real_estate", "other"],
-            )
-            cg_buy_date = st.date_input("Buy Date", value=datetime.now().date())
-            cg_buy_price = st.number_input("Buy Price", min_value=0.0, format="%.2f")
-            cg_units = st.number_input("Units", min_value=0.0, format="%.6f")
-            cg_notes = st.text_input("Notes")
-            if st.form_submit_button("Add Position", use_container_width=True):
-                if cg_asset_name.strip() and cg_units > 0:
-                    new_row = pd.DataFrame(
-                        [
-                            {
-                                "Asset Name": cg_asset_name.strip(),
-                                "Asset Type": cg_asset_type,
-                                "Buy Date": pd.Timestamp(cg_buy_date),
-                                "Buy Price": float(cg_buy_price),
-                                "Sell Date": pd.NaT,
-                                "Sell Price": np.nan,
-                                "Units": float(cg_units),
-                                "Notes": cg_notes,
-                            }
-                        ]
-                    )
-                    st.session_state.capital_gains = pd.concat([st.session_state.capital_gains, new_row], ignore_index=True)
-                    st.success("Position added to table below.")
-                else:
-                    st.warning("Please add asset name and units.")
-
-        edited_cg = st.data_editor(
-            st.session_state.capital_gains,
-            use_container_width=True,
-            num_rows="dynamic",
-            column_config={
-                "Asset Name": st.column_config.TextColumn("Asset Name", required=True),
-                "Asset Type": st.column_config.SelectboxColumn(
-                    "Asset Type",
-                    options=["equity_mf", "debt_mf", "stock", "real_estate", "other"],
-                    required=True,
-                ),
-                "Buy Date": st.column_config.DateColumn("Buy Date", format="YYYY-MM-DD"),
-                "Buy Price": st.column_config.NumberColumn("Buy Price", format="%.2f", min_value=0.0),
-                "Sell Date": st.column_config.DateColumn("Sell Date", format="YYYY-MM-DD"),
-                "Sell Price": st.column_config.NumberColumn("Sell Price", format="%.2f", min_value=0.0),
-                "Units": st.column_config.NumberColumn("Units", format="%.6f", min_value=0.0),
-                "Notes": st.column_config.TextColumn("Notes"),
-            },
-            hide_index=True,
-            key="capital_gains_editor",
-        )
-        st.session_state.capital_gains = edited_cg
-
-        if st.button("Save Capital Gains Positions", type="primary", use_container_width=True, key="save_capital_gains"):
-            db.sync_capital_gains(st.session_state.user.id, st.session_state.capital_gains)
-            st.success("Capital gains positions saved.")
-            st.rerun()
 
 # ============================================================================
 # TAB 6: INSURANCE
 # ============================================================================
 
 with tab6:
-    st.header("🛡️ Insurance")
-    ins_tab1, ins_tab2, ins_tab3 = st.tabs(["Coverage Dashboard", "Policy Inventory", "Endowment Trap Detector"])
+    st.header("\U0001F6E1\uFE0F Insurance")
+    st.caption("Rules of thumb for sizing cover \u2014 not advice. Based on the pay in your profile.")
 
-    life_audit = audit_life_cover(st.session_state.user.id, db.supabase)
-    health_audit = audit_health_cover(st.session_state.user.id, db.supabase)
-    traps = detect_endowment_traps(st.session_state.user.id, db.supabase)
+    _annual_income = safe_float(st.session_state.get("salary", 0.0)) * 12
+    if _annual_income <= 0:
+        st.info("Add your monthly pay from the Profile page and these numbers will fill in.")
+    else:
+        _life_cover = _annual_income * 10
+        _health_cover = max(1000000.0, _annual_income * 0.5)
 
-    with ins_tab1:
-        l_recommended = max(1.0, float(life_audit["recommended"]))
-        l_ratio = float(life_audit["actual"]) / l_recommended
-        h_recommended = max(1.0, float(health_audit["recommended"]))
-        h_ratio = float(health_audit["actual"]) / h_recommended
+        _ins_c1, _ins_c2 = st.columns(2)
+        with _ins_c1:
+            st.metric("Term cover to aim for", f"\u20B9{_life_cover:,.0f}")
+            st.caption("Roughly 10x annual income \u2014 the usual starting point if anyone depends on your income.")
+        with _ins_c2:
+            st.metric("Health cover floor", f"\u20B9{_health_cover:,.0f}")
+            st.caption("At least \u20B910L, or half your annual income, whichever is higher.")
 
-        st.subheader("Life Cover")
-        st.progress(min(1.0, l_ratio), text=f"₹{life_audit['actual']:,.0f} / ₹{life_audit['recommended']:,.0f}")
-        if l_ratio < 0.8:
-            st.error("Life cover is below 80% of recommended coverage.")
-        else:
-            st.success("Life cover looks adequate.")
-
-        st.subheader("Health Cover")
-        st.progress(min(1.0, h_ratio), text=f"₹{health_audit['actual']:,.0f} / ₹{health_audit['recommended']:,.0f}")
-        if health_audit["adequacy"] == "underinsured":
-            st.error("Health cover is below metro baseline (₹10L).")
-        else:
-            st.success("Health cover baseline achieved.")
-
-    with ins_tab2:
-        st.markdown("#### Policies")
-        inventory_df = st.session_state.insurance_policies.copy()
-        if not inventory_df.empty:
-            st.dataframe(
-                inventory_df[
-                    ["Policy Type", "Insurer", "Annual Premium", "Sum Assured", "Maturity Value", "Maturity Date"]
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        st.markdown("#### Add Policy")
-        with st.form("insurance_add_policy_form", clear_on_submit=True):
-            p_name = st.text_input("Policy Name")
-            p_type = st.selectbox(
-                "Policy Type",
-                options=["term_life", "health", "endowment", "money_back", "ulip", "vehicle", "home", "other"],
-            )
-            p_insurer = st.text_input("Insurer")
-            p_premium = st.number_input("Annual Premium", min_value=0.0, format="%.2f")
-            p_cover = st.number_input("Sum Assured", min_value=0.0, format="%.2f")
-            p_maturity_val = st.number_input("Maturity Value", min_value=0.0, format="%.2f")
-            p_start = st.date_input("Start Date", value=datetime.now().date())
-            p_maturity = st.date_input("Maturity Date", value=datetime.now().date())
-            p_active = st.checkbox("Is Active", value=True)
-            p_notes = st.text_input("Notes")
-            if st.form_submit_button("Add Policy", use_container_width=True):
-                if p_name.strip():
-                    new_policy = pd.DataFrame(
-                        [
-                            {
-                                "Policy Name": p_name.strip(),
-                                "Policy Type": p_type,
-                                "Insurer": p_insurer,
-                                "Annual Premium": float(p_premium),
-                                "Sum Assured": float(p_cover),
-                                "Maturity Value": float(p_maturity_val),
-                                "Start Date": pd.Timestamp(p_start),
-                                "Maturity Date": pd.Timestamp(p_maturity),
-                                "Is Active": bool(p_active),
-                                "Notes": p_notes,
-                            }
-                        ]
-                    )
-                    st.session_state.insurance_policies = pd.concat(
-                        [st.session_state.insurance_policies, new_policy], ignore_index=True
-                    )
-                    st.success("Policy added.")
-                else:
-                    st.warning("Policy name is required.")
-
-        edited_ins = st.data_editor(
-            st.session_state.insurance_policies,
-            use_container_width=True,
-            num_rows="dynamic",
-            column_config={
-                "Policy Name": st.column_config.TextColumn("Policy Name", required=True),
-                "Policy Type": st.column_config.SelectboxColumn(
-                    "Policy Type",
-                    options=["term_life", "health", "endowment", "money_back", "ulip", "vehicle", "home", "other"],
-                ),
-                "Insurer": st.column_config.TextColumn("Insurer"),
-                "Annual Premium": st.column_config.NumberColumn("Premium/Yr", format="₹%.2f", min_value=0.0),
-                "Sum Assured": st.column_config.NumberColumn("Cover", format="₹%.2f", min_value=0.0),
-                "Maturity Value": st.column_config.NumberColumn("Maturity", format="₹%.2f", min_value=0.0),
-                "Start Date": st.column_config.DateColumn("Start", format="YYYY-MM-DD"),
-                "Maturity Date": st.column_config.DateColumn("Maturity Date", format="YYYY-MM-DD"),
-                "Is Active": st.column_config.CheckboxColumn("Active"),
-                "Notes": st.column_config.TextColumn("Notes"),
-            },
-            hide_index=True,
-            key="insurance_inventory_editor",
+        st.divider()
+        st.markdown(
+            "**Worth checking**\n\n"
+            "- Buy a term plan, not an endowment or ULIP. Insurance and investment are both cheaper bought separately.\n"
+            "- Cover should last until the people depending on you no longer do, not until a round birthday.\n"
+            "- Employer health cover ends with the job. Hold a personal policy alongside it.\n"
+            "- Premiums paid count towards 80D, which the Tax tab will pick up once it exists."
         )
-        st.session_state.insurance_policies = edited_ins
 
-        if st.button("Save Policies", type="primary", use_container_width=True, key="save_insurance_policies"):
-            db.sync_insurance_policies(st.session_state.user.id, st.session_state.insurance_policies)
-            st.success("Policies saved.")
-            st.rerun()
-
-    with ins_tab3:
-        if traps:
-            for trap in traps:
-                st.error(
-                    f"{trap['policy_name']} | Estimated IRR: {trap['estimated_irr']*100:.2f}% | "
-                    f"Surrender: ₹{trap['surrender_value']:,.0f} | ELSS alt: ₹{trap['elss_projection']:,.0f}"
-                )
-                st.warning(
-                    f"Consider surrendering — redirect Rs {trap['annual_premium']:,.0f}/yr to term plan + ELSS",
-                    icon="⚠️",
-                )
-        else:
-            st.success("No obvious endowment/ULIP trap found in active policies.")
-
-        st.caption("Discuss surrender with a SEBI-registered advisor.")
 
 # ============================================================================
 # TAB 7: GOALS + EF
@@ -2803,6 +2501,10 @@ with tab6:
 
 with tab7:
     st.header("🎯 Goals + Emergency Fund")
+    st.caption(
+        "Fill the emergency fund first, then sequence goals by deadline and priority. "
+        "Monthly surplus is allocated top-down, so the nearest goal is funded before the rest."
+    )
 
     ef_status = get_ef_status(st.session_state.user.id, db.supabase)
     ef_col1, ef_col2, ef_col3 = st.columns(3)
