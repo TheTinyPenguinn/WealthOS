@@ -55,6 +55,35 @@ def _extract_json_object(text: str) -> dict:
 # Provider-side conditions that clear on their own; anything else fails straight away.
 _TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "overloaded")
 
+_GEMINI_FALLBACK = "gemini-3.8-flash"
+_gemini_model_cache: list[str] = []
+
+
+def _gemini_candidates(client, preferred: Optional[str]) -> list[str]:
+    """Models to try, best first: the chosen one, then whatever this key can reach.
+
+    Model names get retired and individual models get saturated, so a single
+    hardcoded name is a single point of failure. The live list is asked for once
+    and reused, and a lookup failure is never fatal.
+    """
+    global _gemini_model_cache
+    ordered = [preferred or _GEMINI_FALLBACK]
+
+    if not _gemini_model_cache:
+        try:
+            _gemini_model_cache = [
+                m.name.split("/")[-1]
+                for m in client.models.list()
+                if "generateContent" in (getattr(m, "supported_actions", None) or [])
+            ]
+        except Exception:
+            _gemini_model_cache = [_GEMINI_FALLBACK]
+
+    for name in _gemini_model_cache:
+        if name not in ordered:
+            ordered.append(name)
+    return ordered
+
 
 def _call_text_llm(
     prompt: str,
@@ -112,9 +141,18 @@ def _call_text_llm_once(
             ) from e
 
         client = genai.Client(api_key=selected_key)
-        use_model = model or "gemini-3.8-flash"
-        response = client.models.generate_content(model=use_model, contents=full_prompt)
-        return (response.text or "").strip()
+        last_exc: Optional[Exception] = None
+        for candidate in _gemini_candidates(client, model):
+            try:
+                response = client.models.generate_content(model=candidate, contents=full_prompt)
+                return (response.text or "").strip()
+            except Exception as exc:
+                # A retired model or a saturated one: try the next. Anything else
+                # (bad key, malformed request) fails now rather than 5 models later.
+                if not any(m in str(exc) for m in _TRANSIENT_MARKERS + ("NOT_FOUND", "404")):
+                    raise
+                last_exc = exc
+        raise last_exc if last_exc else RuntimeError("No Gemini model produced a response.")
 
     if selected_provider == "openai":
         try:
