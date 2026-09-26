@@ -2394,7 +2394,7 @@ with tab4:
         
         with c2:
             # Model Selector persistence (Refactored for Supabase)
-            current_model = st.session_state.get('selected_model', 'gemini-1.5-flash')
+            current_model = st.session_state.get('selected_model', 'gemini-2.0-flash')
             opts = st.session_state.get('available_models', ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash'])
             
             new_model = st.selectbox("Select Model", options=opts, index=0 if current_model not in opts else opts.index(current_model))
