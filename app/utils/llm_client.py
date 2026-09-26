@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import re
+import time
 from typing import Any, Optional
 
 
@@ -51,7 +52,41 @@ def _extract_json_object(text: str) -> dict:
         return {}
 
 
+# Provider-side conditions that clear on their own; anything else fails straight away.
+_TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "overloaded")
+
+
 def _call_text_llm(
+    prompt: str,
+    *,
+    system_prompt: Optional[str] = None,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+    provider: Optional[str] = None,
+    temperature: float = 0.2,
+    max_tokens: int = 1024,
+) -> str:
+    """Call the provider, retrying briefly when it reports a temporary overload."""
+    delays = (1.0, 3.0)
+    for attempt in range(len(delays) + 1):
+        try:
+            return _call_text_llm_once(
+                prompt,
+                system_prompt=system_prompt,
+                model=model,
+                api_key=api_key,
+                provider=provider,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            transient = any(marker in str(exc) for marker in _TRANSIENT_MARKERS)
+            if not transient or attempt == len(delays):
+                raise
+            time.sleep(delays[attempt])
+
+
+def _call_text_llm_once(
     prompt: str,
     *,
     system_prompt: Optional[str] = None,

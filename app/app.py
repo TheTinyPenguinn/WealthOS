@@ -1859,6 +1859,11 @@ with tab1:
                     st.error(
                         "That model isn't available for this API key. Pick another one in AI Settings."
                     )
+                elif any(s in detail for s in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "overloaded")):
+                    st.error(
+                        "The AI provider is busy right now — this one is on their side, not yours. "
+                        "Wait a few seconds and ask again."
+                    )
                 else:
                     st.error(f"The AI call failed: {detail[:200]}")
             else:
