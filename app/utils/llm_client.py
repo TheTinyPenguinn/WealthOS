@@ -77,7 +77,7 @@ def _call_text_llm(
             ) from e
 
         client = genai.Client(api_key=selected_key)
-        use_model = model or "gemini-2.0-flash"
+        use_model = model or "gemini-3.8-flash"
         response = client.models.generate_content(model=use_model, contents=full_prompt)
         return (response.text or "").strip()
 
@@ -207,7 +207,7 @@ def call_vision(
             ) from e
 
         client = genai.Client(api_key=selected_key)
-        use_model = model or "gemini-2.0-flash"
+        use_model = model or "gemini-3.8-flash"
         response = client.models.generate_content(
             model=use_model,
             contents=[prompt, types.Part.from_bytes(data=image_bytes, mime_type=mime_type)],

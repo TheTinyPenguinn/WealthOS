@@ -320,10 +320,10 @@ if not st.session_state.data_loaded:
             secrets_api_key = _get_secret_or_env(provider_env_key)
             st.session_state.api_key = db_api_key if db_api_key else secrets_api_key
             
-            _stored_model = settings.get("selected_model") or "gemini-2.0-flash"
-            # gemini-1.5-* were retired by the API; a stored one fails every call
-            if _stored_model.startswith("gemini-1.5"):
-                _stored_model = "gemini-2.0-flash"
+            _stored_model = settings.get("selected_model") or "gemini-3.8-flash"
+            # Retired Gemini models fail every call; migrate a saved one forward.
+            if _stored_model.startswith(("gemini-1.5", "gemini-2.0")):
+                _stored_model = "gemini-3.8-flash"
             st.session_state.selected_model = _stored_model
             
             st.session_state.data_loaded = True
@@ -2393,13 +2393,13 @@ with tab4:
                     call_llm(
                         "Reply with OK.",
                         system_prompt=risk_system_prompt,
-                        model=st.session_state.get("selected_model", "gemini-2.0-flash"),
+                        model=st.session_state.get("selected_model", "gemini-3.8-flash"),
                         api_key=st.session_state.api_key,
                         provider=provider,
                         max_tokens=32,
                     )
                     default_models = {
-                        "gemini": ["gemini-2.0-flash"],
+                        "gemini": ["gemini-3.8-flash"],
                         "openai": ["gpt-4o-mini", "gpt-4o", "o4-mini"],
                         "anthropic": ["claude-3-5-haiku-latest", "claude-3-5-sonnet-latest"],
                     }
@@ -2411,8 +2411,8 @@ with tab4:
         
         with c2:
             # Model Selector persistence (Refactored for Supabase)
-            current_model = st.session_state.get('selected_model', 'gemini-2.0-flash')
-            opts = st.session_state.get('available_models', ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash'])
+            current_model = st.session_state.get('selected_model', 'gemini-3.8-flash')
+            opts = st.session_state.get('available_models', ['gemini-3.8-flash'])
             
             new_model = st.selectbox("Select Model", options=opts, index=0 if current_model not in opts else opts.index(current_model))
             if new_model != current_model:

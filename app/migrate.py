@@ -35,7 +35,7 @@ def migrate():
                     "user_id": user_id,
                     "salary": float(s.get('salary', 0)),
                     "api_key": s.get('api_key', ''),
-                    "selected_model": s.get('selected_model', 'gemini-1.5-flash')
+                    "selected_model": s.get('selected_model', 'gemini-3.8-flash')
                 }
                 supabase.table("user_settings").upsert(payload, on_conflict="user_id").execute()
                 print("✅ Settings migrated")

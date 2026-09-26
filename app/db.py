@@ -142,7 +142,7 @@ def load_all_data(user_id):
         settings_res = supabase.table("user_settings").select("*").eq("user_id", user_id).execute()
         if not settings_res.data:
             # New user handling
-            default_settings = {"user_id": user_id, "salary": 0.0, "api_key": "", "selected_model": "gemini-1.5-flash"}
+            default_settings = {"user_id": user_id, "salary": 0.0, "api_key": "", "selected_model": "gemini-3.8-flash"}
             supabase.table("user_settings").insert(default_settings).execute()
             settings = default_settings
         else:
