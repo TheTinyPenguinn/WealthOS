@@ -228,11 +228,26 @@ def handle_logout():
 
 # --- AUTH UI ---
 if st.session_state.user is None:
-    st.title("🔐 WealthOS Cloud")
-    supabase_url_hint = _get_secret_or_env("SUPABASE_URL")
-    if supabase_url_hint:
-        project_ref = supabase_url_hint.replace("https://", "").replace(".supabase.co", "")
-        st.caption(f"Connected project: `{project_ref}`")
+    st.title("💰 WealthOS")
+    st.markdown(
+        "**A personal CFO for salaried professionals in India.** Most money apps show you "
+        "charts of what you already spent. This one tries the opposite: look at your income, "
+        "debt and investments together, and say what to do next — which EMI to clear first, "
+        "whether a SIP is actually costing you money while a credit card runs at 36%."
+    )
+    st.markdown(
+        "**Getting started**  \n"
+        "1. Sign up with any email and password.  \n"
+        "2. Enter your approximate monthly take-home pay — that alone gets the dashboard working.  \n"
+        "3. Add accounts, EMIs and investments as you go, or import a bank statement or Zerodha CSV.  \n"
+        "4. Ask the AI tab questions about your own numbers."
+    )
+    st.info(
+        "An early MVP, built solo — expect rough edges, and treat it as a prototype rather than "
+        "financial advice. What you enter is visible only to your own account. Please don't upload "
+        "real bank statements or account numbers; made-up figures work fine for trying it out."
+    )
+    st.caption("Code and product docs: github.com/TheTinyPenguinn/WealthOS")
     auth_tab1, auth_tab2 = st.tabs(["Login", "Sign Up"])
     
     with auth_tab1:
