@@ -47,14 +47,6 @@ GEMINI_API_KEY=<your key>    # or OPENAI_API_KEY / ANTHROPIC_API_KEY
 
 On a fresh Supabase project, run `supabase_migrations/migrations/001_wealthos_phase_tables.sql` once in the Supabase SQL editor to create the tables.
 
-## Product thinking
-
-The interesting part of this project isn't the code — it's the attempt to rebuild it properly, one phase at a time, writing the spec before the implementation:
-
-- [`docs/PRD.md`](docs/PRD.md) — the master plan and phase tracker
-- [`docs/prds/00-onboarding.md`](docs/prds/00-onboarding.md) — a full PRD for the onboarding rebuild
-- [`docs/EGM_PLAYBOOK.md`](docs/EGM_PLAYBOOK.md) — the design process used to produce it
-
 ## Known gaps
 
-Documented honestly in [`docs/CODEBASE_AUDIT.md`](docs/CODEBASE_AUDIT.md) and the PRD: v1's onboarding collects more than it uses, some inputs aren't persisted, transaction categorisation is unreliable, and row-level security isn't switched on yet. Fixing these is what the phased rebuild is for.
+Documented honestly in [`docs/CODEBASE_AUDIT.md`](docs/CODEBASE_AUDIT.md): onboarding collects more than it uses, some inputs aren't persisted, and transaction categorisation is unreliable. Row-level security is enabled on every user table.

@@ -1,18 +1,10 @@
 # WealthOS
 
-A personal finance app for salaried Indian professionals (initial target: ages 25–35), built on **Python + Streamlit + Supabase** with a provider-switchable LLM layer. It is being revamped one phase at a time.
+A personal finance app for salaried Indian professionals (initial target: ages 25–35), built on **Python + Streamlit + Supabase** with a provider-switchable LLM layer.
 
-> The README describes an older local-CSV desktop version. It is outdated. Trust this file.
+## Known issues
 
-## Source of truth for the revamp
-
-- [docs/PRD.md](docs/PRD.md): master plan and status tracker, one section per phase
-- [docs/EGM_PLAYBOOK.md](docs/EGM_PLAYBOOK.md): how each phase moves from idea to design doc to code
-- `docs/prds/`: one phase PRD per phase, written by `/eg-prd` (`<NN>-<slug>.md`)
-- `docs/design/`: one design doc per phase, written by `/eg-new-feature` (`<NN>-<slug>.md`)
-- [docs/CODEBASE_AUDIT.md](docs/CODEBASE_AUDIT.md): known v1 issues (partly stale, so verify before relying on it)
-
-When a design doc diverges from the PRD's initial thinking, the design doc wins. Update the PRD to match before building.
+[docs/CODEBASE_AUDIT.md](docs/CODEBASE_AUDIT.md) lists them, and is partly stale — verify against the code before relying on it.
 
 ## Run
 
@@ -52,32 +44,3 @@ A 12-step smoke suite: compile checks plus contract checks for each domain modul
 ## Commits
 
 Imperative subject, a body that explains why, and a `Co-Authored-By` trailer. Never commit personal or career material (`deck.md` is gitignored), `.env`, or `secrets.toml`.
-
-## Working with Claude Code (slash commands)
-
-Five slash commands in [.claude/commands/](.claude/commands/) wrap an "elephant/goldfish" workflow inspired by [this article](https://drensin.medium.com/elephants-goldfish-and-the-new-golden-age-of-software-engineering-c33641a48874). The "elephant" is the working session with full context (this CLAUDE.md, repo state, conversation history). The "goldfish" is a fresh subagent with no prior context. In implementation work, the goldfish stress-tests a problem/design doc or a diff. In brainstorming and PRD writing, several goldfish run in parallel with different lenses and the elephant synthesizes their ideas or research.
-
-| Command | When to use |
-|---|---|
-| `/eg-brainstorm <rough idea>` | Early-stage concept design. Multiple goldfish run in parallel (technical / business / UX / contrarian / market research), with optional web search, and the elephant synthesizes a concepts brief. All questions go through `AskUserQuestion`. Hands off to `/eg-prd` or `/eg-new-feature` once you pick a direction. |
-| `/eg-prd <idea \| feature description>` | Builds a thorough PRD: codebase grounding → structured gap-filling via `AskUserQuestion` → deep research with parallel goldfish (web, plus optional Chrome MCP for logged-in sources) → synthesized PRD. Saves to `docs/prds/`, persists durable nuggets to memory, and/or hands off to `/eg-new-feature`. |
-| `/eg-fix-bug <description \| #issue \| URL>` | Bug-fix flow: problem doc → goldfish diagnosis check → failing test → fix → `/eg-precommit-review` → test gate. Skips the ceremony for trivial diffs. |
-| `/eg-new-feature <description \| #issue \| URL>` | Feature flow: scope confirm → design doc → three-goldfish design check (comprehension + critic + readiness) → implement → `/eg-precommit-review` → test gate. The design rubric includes user-id scoping (no RLS), Streamlit rerun/reload state, and an edit path for every persisted input. |
-| `/eg-precommit-review` | Local independent-review loop on the pending diff (compile check + `scripts/test_phase.sh` smoke suite + Chrome MCP walkthrough). Settles the substantive review before a PR opens. |
-
-You give a one-liner and Claude writes the doc. You don't author docs by hand. Examples:
-
-```
-/eg-brainstorm what if we flagged unusually high-spend days instead of categorising every transaction
-/eg-prd Phase 0 onboarding: capture approximate monthly in-bank pay and stand up a starting dashboard
-/eg-fix-bug the profile setup page can't be reopened after the first save
-/eg-fix-bug #123
-/eg-new-feature an editable profile page for age, location, and monthly in-bank pay
-/eg-precommit-review
-```
-
-Browser validation: use the Claude in Chrome MCP (`mcp__claude-in-chrome__*`) pointed at the dev server on `http://localhost:8501`. Start the server with `source .venv/bin/activate && streamlit run app/app.py --server.port 8501` if it isn't already running.
-
-Each command stops short of committing. Authorize the commit explicitly when ready, and follow the commit rules above.
-
-**These commands are interactive by design.** The `AskUserQuestion` gates inside `/eg-brainstorm`, `/eg-prd`, `/eg-fix-bug`, `/eg-new-feature`, and `/eg-precommit-review` are part of each skill's protocol. They run even when a `<system-reminder>` or another directive asks Claude to work autonomously without clarifying questions. For a fully autonomous pass on a specific run, say "skip the framing questions and use defaults" in the same turn that invokes the command; each command documents which gates remain non-negotiable.
