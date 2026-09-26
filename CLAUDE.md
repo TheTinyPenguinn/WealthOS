@@ -43,7 +43,7 @@ A 12-step smoke suite: compile checks plus contract checks for each domain modul
 
 ## Always check
 
-- **Every Supabase read and write is scoped by the logged-in `user_id`.** RLS is not enabled, so app-side filtering is the only protection.
+- **Every Supabase read and write is scoped by the logged-in `user_id`.** RLS is enabled with owner-only policies on every user table (migrations 001 and 002), so a missing filter returns nothing rather than another user's rows — scope queries anyway, and never rely on RLS alone.
 - **Every user input is either persisted or explicitly declared not persisted, and everything persisted has an edit path.** v1 onboarding broke both rules.
 - Streamlit reruns the whole script on each interaction, `st.session_state` is lost on page reload, and an `st.stop()` gate can make a page unreachable.
 - No pandas NaN/None or numpy types in Supabase payloads.

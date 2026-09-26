@@ -1,5 +1,5 @@
 """
-WealthOS v4: Personal Finance Dashboard
+WealthOS: Personal Finance Dashboard
 Tabbed layout with Investment Tracking, True Net Worth calculation, Zerodha Integration,
 and Asset/Liability tracking.
 """
@@ -171,7 +171,7 @@ def save_all_data_callback():
 # ============================================================================
 
 st.set_page_config(
-    page_title="WealthOS v4",
+    page_title="WealthOS",
     page_icon="💰",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -1334,7 +1334,7 @@ if _first_time_setup or st.session_state.show_profile:
     st.stop()
 
 # --- SIDEBAR - RICH CLASSIC DESIGN ---
-st.sidebar.title("💰 WealthOS v5")
+st.sidebar.title("💰 WealthOS")
 
 if st.sidebar.button("👤 Profile", use_container_width=True):
     st.session_state.show_profile = True
@@ -1622,7 +1622,7 @@ if st.sidebar.button("🚪 Logout", use_container_width=True, key="sidebar_logou
 st.sidebar.caption("☁️ WealthOS Cloud Connection Active")
 
 # --- MAIN PAGE - TABBED LAYOUT ---
-st.title("WealthOS v5")
+st.title("WealthOS")
 m1, m2, m3, m4 = st.columns(4)
 with m1:
     st.metric("Transactions", f"{len(st.session_state.expenses):,}")
@@ -2896,4 +2896,4 @@ with tab7:
 # ============================================================================
 
 st.divider()
-st.caption("WealthOS v4 • Built with Streamlit")
+st.caption("WealthOS • Built with Streamlit")
