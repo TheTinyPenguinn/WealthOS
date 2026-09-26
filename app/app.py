@@ -1775,12 +1775,19 @@ with tab1:
     # ROW 3 — Charts
     c_left, c_right = st.columns(2)
     with c_left:
-        st.subheader("Spend by Category (30 days)")
+        st.subheader("Spend by Category")
         if not st.session_state.expenses.empty:
             exp = st.session_state.expenses.copy()
             exp["Date"] = pd.to_datetime(exp["Date"], errors="coerce")
-            cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
-            exp = exp[(exp["Date"] >= cutoff) & (exp["Amount"] < 0)]
+            exp = exp.dropna(subset=["Date"])
+            exp = exp[exp["Amount"] < 0]
+            # Imported statements are usually historical, so anchor the window to
+            # the newest transaction rather than to today. Showing "no data" beside
+            # a header boasting 458 transactions reads as broken, not as empty.
+            if not exp.empty:
+                window_end = exp["Date"].max()
+                exp = exp[exp["Date"] >= window_end - pd.Timedelta(days=30)]
+                st.caption(f"30 days to {window_end:%d %b %Y}")
             spend = (
                 exp.assign(Amount=exp["Amount"].abs())
                 .groupby("Category", as_index=False)["Amount"]
@@ -1796,12 +1803,17 @@ with tab1:
             else:
                 st.info("No expense data in last 30 days.")
     with c_right:
-        st.subheader("Net Worth Trend (6 months)")
+        st.subheader("Net Worth Trend")
         if not st.session_state.expenses.empty:
             exp = st.session_state.expenses.copy()
             exp["Date"] = pd.to_datetime(exp["Date"], errors="coerce")
             exp = exp.dropna(subset=["Date"])
-            month_idx = pd.date_range(end=pd.Timestamp.now().normalize(), periods=6, freq="MS")
+            # Anchored to the newest transaction, not today, so the axis matches
+            # the data. Labelling it "6 months" while plotting a two-month-old
+            # window was simply wrong.
+            anchor = exp["Date"].max().to_period("M").to_timestamp() if not exp.empty else pd.Timestamp.now().normalize()
+            st.caption(f"6 months to {anchor:%b %Y}")
+            month_idx = pd.date_range(end=anchor, periods=6, freq="MS")
             monthly_flow = (
                 exp.set_index("Date")
                 .groupby(pd.Grouper(freq="MS"))["Amount"]

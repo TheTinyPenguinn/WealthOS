@@ -502,6 +502,17 @@ def sync_settings(user_id, salary, api_key, model):
     }
     supabase.table("user_settings").upsert(payload, on_conflict="user_id").execute()
 
+    # Pay is stored in two places — user_settings.salary drives the dashboard,
+    # user_profile.monthly_income drives the tax surfaces. Editing salary here
+    # used to update only the first, so the two drifted and the app quoted two
+    # different incomes. Mirror it; never fatal if the profile row is absent.
+    try:
+        supabase.table("user_profile").upsert(
+            {"user_id": user_id, "monthly_income": float(salary)}, on_conflict="user_id"
+        ).execute()
+    except Exception:
+        pass
+
 def sync_illiquid_assets(user_id, df):
     """Sync illiquid assets table for user."""
     try:

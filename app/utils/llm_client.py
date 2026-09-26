@@ -301,6 +301,15 @@ def call_llm(
     )
     data = _extract_json_object(raw)
     if not data:
+        # The model was told to reply in JSON, so a parse failure usually means
+        # the answer was cut off mid-object by the token limit. Returning the raw
+        # string shows the user a wall of `{"text":"...` — salvage the prose
+        # instead, and only fall back to the raw text if there is nothing to find.
+        salvaged = re.search(r'"text"\s*:\s*"(.*)', raw or "", flags=re.DOTALL)
+        if salvaged:
+            text = salvaged.group(1).rsplit('"', 1)[0] if salvaged.group(1).rstrip().endswith('"') else salvaged.group(1)
+            text = text.encode().decode("unicode_escape", errors="ignore").strip()
+            return {"tool_call": None, "text": text + " …[truncated]"}
         return {"tool_call": None, "text": (raw or "").strip()}
 
     tc = data.get("tool_call")

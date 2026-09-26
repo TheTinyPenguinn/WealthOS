@@ -65,11 +65,19 @@ def _determine_risk(profile: dict) -> str:
 
 
 def _income_and_regime(user_id: str, supabase):
+    """Income the agent reasons with, and the tax regime.
+
+    Income is read from user_settings.salary because that is the figure the
+    dashboard displays and the sidebar edits. Reading user_profile first meant
+    the agent quoted a different salary, surplus and runway than the numbers on
+    screen, which destroys trust in both. The regime still comes from the
+    profile, which is the only place it is set.
+    """
+    regime = "new"
     try:
         profile_res = supabase.table("user_profile").select("*").eq("user_id", user_id).limit(1).execute()
         if profile_res.data:
-            p = profile_res.data[0]
-            return _safe_float(p.get("monthly_income"), 0.0), p.get("tax_regime", "new")
+            regime = profile_res.data[0].get("tax_regime") or "new"
     except Exception:
         pass
 
@@ -78,7 +86,17 @@ def _income_and_regime(user_id: str, supabase):
         salary = _safe_float(settings_res.data[0].get("salary"), 0.0) if settings_res.data else 0.0
     except Exception:
         salary = 0.0
-    return salary, "new"
+
+    if salary <= 0:
+        # Nothing in settings yet: fall back to the profile figure.
+        try:
+            profile_res = supabase.table("user_profile").select("monthly_income").eq("user_id", user_id).limit(1).execute()
+            if profile_res.data:
+                salary = _safe_float(profile_res.data[0].get("monthly_income"), 0.0)
+        except Exception:
+            pass
+
+    return salary, regime
 
 
 def get_user_profile(user_id: str, supabase) -> dict:
@@ -268,7 +286,9 @@ def run_agent_with_trace(
                 api_key=api_key,
                 provider=provider,
                 model=model,
-                max_tokens=2048,
+                # 2048 truncated real answers mid-sentence, which then failed to
+                # parse as JSON and leaked the raw envelope into the chat.
+                max_tokens=4096,
             )
             tool_call = resp.get("tool_call") if isinstance(resp, dict) else None
             if tool_call:
