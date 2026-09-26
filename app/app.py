@@ -2406,7 +2406,7 @@ with tab4:
                     default_models = {
                         "gemini": ["gemini-3.8-flash"],
                         "openai": ["gpt-4o-mini", "gpt-4o", "o4-mini"],
-                        "anthropic": ["claude-3-5-haiku-latest", "claude-3-5-sonnet-latest"],
+                        "anthropic": ["claude-sonnet-5"],
                     }
                     models = default_models.get(provider, default_models["gemini"])
                     st.session_state.available_models = models

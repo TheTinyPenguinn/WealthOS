@@ -58,6 +58,27 @@ _TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "overlo
 _GEMINI_FALLBACK = "gemini-3.8-flash"
 _gemini_model_cache: list[str] = []
 
+_ANTHROPIC_FALLBACK = "claude-sonnet-5"
+_anthropic_model_cache: list[str] = []
+
+
+def _anthropic_candidates(client, preferred: Optional[str]) -> list[str]:
+    """Anthropic models to try, best first. Same reasoning as the Gemini list:
+    aliases get retired, so ask the account what it can actually reach."""
+    global _anthropic_model_cache
+    ordered = [preferred or _ANTHROPIC_FALLBACK]
+
+    if not _anthropic_model_cache:
+        try:
+            _anthropic_model_cache = [m.id for m in client.models.list()]
+        except Exception:
+            _anthropic_model_cache = [_ANTHROPIC_FALLBACK]
+
+    for name in _anthropic_model_cache:
+        if name not in ordered:
+            ordered.append(name)
+    return ordered
+
 
 def _gemini_candidates(client, preferred: Optional[str]) -> list[str]:
     """Models to try, best first: the chosen one, then whatever this key can reach.
@@ -206,19 +227,31 @@ def _call_text_llm_once(
         ) from e
 
     client = Anthropic(api_key=selected_key)
-    use_model = model or "claude-3-5-sonnet-latest"
-    create_kwargs: dict[str, Any] = {
-        "model": use_model,
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": full_prompt}],
-    }
-    # anthropic 1.x removed temperature from messages.create().
-    if "temperature" in inspect.signature(client.messages.create).parameters:
-        create_kwargs["temperature"] = temperature
-    response = client.messages.create(**create_kwargs)
-    if not response.content:
-        return ""
-    return "".join(block.text for block in response.content if getattr(block, "type", "") == "text").strip()
+    last_exc: Optional[Exception] = None
+    for candidate in _anthropic_candidates(client, model):
+        create_kwargs: dict[str, Any] = {
+            "model": candidate,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": full_prompt}],
+        }
+        # anthropic 1.x removed temperature from messages.create().
+        if "temperature" in inspect.signature(client.messages.create).parameters:
+            create_kwargs["temperature"] = temperature
+        try:
+            response = client.messages.create(**create_kwargs)
+        except Exception as exc:
+            # Retired alias or saturated model: try the next. Anything else
+            # (bad key, malformed request) fails now rather than 5 models later.
+            if not any(m in str(exc) for m in _TRANSIENT_MARKERS + ("not_found", "NOT_FOUND", "404")):
+                raise
+            last_exc = exc
+            continue
+        if not response.content:
+            return ""
+        return "".join(
+            block.text for block in response.content if getattr(block, "type", "") == "text"
+        ).strip()
+    raise last_exc if last_exc else RuntimeError("No Anthropic model produced a response.")
 
 
 def call_llm(
