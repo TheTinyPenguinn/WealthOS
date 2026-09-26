@@ -95,24 +95,51 @@ def _call_text_llm(
     temperature: float = 0.2,
     max_tokens: int = 1024,
 ) -> str:
-    """Call the provider, retrying briefly when it reports a temporary overload."""
+    """Call the provider, retrying transient failures, then trying other vendors.
+
+    One vendor being overloaded should not take the assistant down, so after the
+    chosen provider is exhausted we try any other provider that has its own key
+    configured. The caller's key is never sent to a different vendor: fallbacks
+    resolve their own key from the environment or secrets.
+    """
     delays = (1.0, 3.0)
-    for attempt in range(len(delays) + 1):
-        try:
-            return _call_text_llm_once(
-                prompt,
-                system_prompt=system_prompt,
-                model=model,
-                api_key=api_key,
-                provider=provider,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        except Exception as exc:
-            transient = any(marker in str(exc) for marker in _TRANSIENT_MARKERS)
-            if not transient or attempt == len(delays):
-                raise
-            time.sleep(delays[attempt])
+    first_choice = _normalize_provider(provider)
+    last_exc: Optional[Exception] = None
+
+    for candidate, candidate_key in _provider_candidates(first_choice, api_key):
+        for attempt in range(len(delays) + 1):
+            try:
+                return _call_text_llm_once(
+                    prompt,
+                    system_prompt=system_prompt,
+                    model=model if candidate == first_choice else None,
+                    api_key=candidate_key,
+                    provider=candidate,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if not any(marker in str(exc) for marker in _TRANSIENT_MARKERS):
+                    break  # permanent for this vendor; try the next one
+                if attempt == len(delays):
+                    break
+                time.sleep(delays[attempt])
+
+    raise last_exc if last_exc else RuntimeError("No LLM provider was reachable.")
+
+
+def _provider_candidates(
+    first_choice: str, api_key: Optional[str]
+) -> list[tuple[str, Optional[str]]]:
+    """The chosen provider first, then any other vendor holding its own key."""
+    candidates: list[tuple[str, Optional[str]]] = [(first_choice, api_key)]
+    for other in ("gemini", "anthropic", "openai"):
+        if other == first_choice:
+            continue
+        if _resolve_api_key(other, None):
+            candidates.append((other, None))
+    return candidates
 
 
 def _call_text_llm_once(
